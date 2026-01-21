@@ -1,0 +1,68 @@
+{
+  "app.title": "AI词汇检测",
+  "app.subtitle": "检测文本中的罕见词汇",
+
+  "toolbar.load_pdf": "加载PDF",
+  "toolbar.show_vocab": "词汇表",
+
+  "library.label": "文献库:",
+  "library.new_title": "新建文献库",
+  "library.new_prompt": "请输入文献库名称:",
+  "library.exists": "文献库已存在",
+  "library.delete_title": "删除文献库",
+  "library.delete_confirm": "确定删除文献库 \"{name}\"? 此操作不可恢复。",
+  "library.select_first": "请先选择或创建文献库",
+  "library.create_first": "您需要先创建一个文献库。现在创建吗？",
+  "library.menu_rename": "重命名文献库...",
+  "library.menu_info": "文献库信息",
+  "library.menu_open_folder": "打开数据文件夹",
+  "library.menu_clear": "清空文献库数据",
+  "library.menu_delete": "删除文献库",
+  "library.rename_title": "重命名文献库",
+  "library.rename_prompt": "输入新名称:",
+  "library.info_title": "文献库信息",
+  "library.info_message": "名称: {name}\n论文数: {doc_count}\n词汇量: {word_count}\n\n数据文件:\n{path}",
+  "library.clear_title": "清空文献库",
+  "library.clear_confirm": "清空文献库 \"{name}\" 的所有数据? 文献库将被保留但数据会被清空。",
+
+  "onboarding.text": "欢迎使用 AI词汇检测器！\n\n快速入门：\n\n1. 点击 [+] 创建新文献库\n   （例如：\"金融\"、\"医学\"、\"计算机\"）\n\n2. 点击 [加载PDF] 添加论文到文献库\n   选择包含PDF文件的文件夹\n\n3. 在此处粘贴文本，点击 [分析]\n   词汇将按稀有度高亮显示：\n   - 绿色 = 常见 (>50%论文包含)\n   - 黑色 = 正常 (10-50%)\n   - 橙色 = 罕见 (<10%)\n   - 红色 = 未见 (从未出现)\n\n提示：点击 [⋮] 可重命名、查看信息或管理文献库！",
+
+  "panel.input_title": "输入文本",
+  "panel.analyze": "分析",
+  "panel.result_title": "结果",
+
+  "status.loading": "加载中...",
+  "status.ready": "就绪 | {pdf_count}篇 | {word_count}词",
+  "status.not_found": "无文献库 - 请先创建",
+  "status.processing": "{current}/{total} - {filename}",
+  "status.starting": "处理中...",
+  "status.complete": "完成! {count}篇 | {word_count}词",
+
+  "stats.panel_title": "词频统计表",
+  "stats.panel_hint": "按稀有度排序（最稀有在前）",
+  "stats.placeholder": "点击「分析」查看词频统计",
+  "stats.summary": "{total}个词 | {unseen}个未见 | {rare}个罕见",
+  "stats.common_short": "常见",
+  "stats.normal_short": "正常",
+  "stats.rare_short": "罕见",
+  "stats.unseen_short": "未见",
+  "stats.word": "词汇",
+  "stats.doc_freq": "文档频率",
+  "stats.doc_pct": "占比",
+  "stats.total_freq": "总数",
+  "stats.status": "状态",
+
+  "vocab.header": "# 学术语料库常用词汇\n\n来自{doc_count}篇论文的高频词:",
+
+  "msg.select_folder": "选择PDF文件夹",
+  "msg.complete": "完成",
+  "msg.success_process": "已处理{count}个PDF",
+  "msg.warning": "提示",
+  "msg.load_vocab_first": "请先选择或创建文献库",
+  "msg.enter_text": "请输入要分析的文本",
+
+  "lang.detected": "{lang}",
+  "lang.english": "英文",
+  "lang.chinese": "中文",
+  "lang.mixed": "混合"
+}

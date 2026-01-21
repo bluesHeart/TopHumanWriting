@@ -1,0 +1,68 @@
+{
+  "app.title": "AI Word Detector",
+  "app.subtitle": "Detect uncommon words in text",
+
+  "toolbar.load_pdf": "Load PDF",
+  "toolbar.show_vocab": "Vocab",
+
+  "library.label": "Library:",
+  "library.new_title": "New Library",
+  "library.new_prompt": "Enter library name:",
+  "library.exists": "Library already exists",
+  "library.delete_title": "Delete Library",
+  "library.delete_confirm": "Delete library \"{name}\"? This cannot be undone.",
+  "library.select_first": "Please select or create a library first",
+  "library.create_first": "You need to create a library first. Create one now?",
+  "library.menu_rename": "Rename Library...",
+  "library.menu_info": "Library Info",
+  "library.menu_open_folder": "Open Data Folder",
+  "library.menu_clear": "Clear Library Data",
+  "library.menu_delete": "Delete Library",
+  "library.rename_title": "Rename Library",
+  "library.rename_prompt": "Enter new name:",
+  "library.info_title": "Library Information",
+  "library.info_message": "Name: {name}\nPapers: {doc_count}\nUnique words: {word_count}\n\nData file:\n{path}",
+  "library.clear_title": "Clear Library",
+  "library.clear_confirm": "Clear all data in library \"{name}\"? The library will be empty but not deleted.",
+
+  "onboarding.text": "Welcome to AI Word Detector!\n\nGetting Started:\n\n1. Click [+] to create a new library\n   (e.g., \"Finance\", \"Medical\", \"CS\")\n\n2. Click [Load PDF] to add papers to your library\n   Select a folder containing PDF files\n\n3. Paste your text here and click [Analyze]\n   Words will be highlighted based on rarity:\n   - Green = Common (>50% of papers)\n   - Black = Normal (10-50%)\n   - Orange = Rare (<10%)\n   - Red = Unseen (never appeared)\n\nTip: Click [⋮] to rename, view info, or manage libraries!",
+
+  "panel.input_title": "Input Text",
+  "panel.analyze": "Analyze",
+  "panel.result_title": "Results",
+
+  "status.loading": "Loading...",
+  "status.ready": "Ready | {pdf_count} papers | {word_count} words",
+  "status.not_found": "No library - Create one first",
+  "status.processing": "{current}/{total} - {filename}",
+  "status.starting": "Processing...",
+  "status.complete": "Done! {count} papers | {word_count} words",
+
+  "stats.panel_title": "Word Frequency Table",
+  "stats.panel_hint": "Sorted by rarity (rarest first)",
+  "stats.placeholder": "Click \"Analyze\" to see word frequency statistics",
+  "stats.summary": "{total} unique words | {unseen} unseen | {rare} rare",
+  "stats.common_short": "Common",
+  "stats.normal_short": "Normal",
+  "stats.rare_short": "Rare",
+  "stats.unseen_short": "Unseen",
+  "stats.word": "Word",
+  "stats.doc_freq": "Doc Freq",
+  "stats.doc_pct": "Doc %",
+  "stats.total_freq": "Total",
+  "stats.status": "Status",
+
+  "vocab.header": "# Common Words in Academic Corpus\n\nTop words from {doc_count} papers:",
+
+  "msg.select_folder": "Select PDF folder",
+  "msg.complete": "Complete",
+  "msg.success_process": "Processed {count} PDFs",
+  "msg.warning": "Warning",
+  "msg.load_vocab_first": "Select or create a library first",
+  "msg.enter_text": "Enter text to analyze",
+
+  "lang.detected": "{lang}",
+  "lang.english": "EN",
+  "lang.chinese": "ZH",
+  "lang.mixed": "Mixed"
+}
