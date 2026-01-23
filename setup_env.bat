@@ -31,7 +31,7 @@ if errorlevel 1 (
 )
 
 echo [2/2] 安装依赖...
-venv\Scripts\pip.exe install PyMuPDF pyinstaller -q
+venv\Scripts\pip.exe install -r requirements.txt pyinstaller -q
 
 echo.
 echo ========================================

@@ -1,0 +1,65 @@
+{
+  "meta": {
+    "name": "ai_word_detector_uiux_tokens",
+    "version": "0.1"
+  },
+  "color": {
+    "light": {
+      "bgPrimary": "#f8f9fa",
+      "bgSecondary": "#ffffff",
+      "bgTertiary": "#e9ecef",
+      "bgInput": "#ffffff",
+      "textPrimary": "#212529",
+      "textSecondary": "#495057",
+      "textMuted": "#6c757d",
+      "border": "#dee2e6"
+    },
+    "dark": {
+      "bgPrimary": "#1a1a1a",
+      "bgSecondary": "#242424",
+      "bgTertiary": "#2e2e2e",
+      "bgInput": "#2a2a2a",
+      "textPrimary": "#e4e4e4",
+      "textSecondary": "#a8a8a8",
+      "textMuted": "#707070",
+      "border": "#3a3a3a"
+    },
+    "accent": {
+      "default": "#3b82f6",
+      "hover": "#2563eb",
+      "pressed": "#1d4ed8"
+    },
+    "semantic": {
+      "success": "#16a34a",
+      "warning": "#d97706",
+      "danger": "#dc2626"
+    },
+    "progress": {
+      "track": "bgTertiary",
+      "fill": "accent.default",
+      "heightPx": 10,
+      "radiusPx": 5
+    }
+  },
+  "typography": {
+    "fontFamily": {
+      "ui": "Microsoft YaHei UI",
+      "mono": "Cascadia Code"
+    },
+    "sizePx": {
+      "xs": 9,
+      "sm": 10,
+      "md": 11,
+      "lg": 13,
+      "xl": 15
+    }
+  },
+  "motion": {
+    "durationMs": {
+      "progressFill": 180
+    },
+    "easing": {
+      "progressFill": "easeOutCubic"
+    }
+  }
+}

@@ -1,0 +1,203 @@
+{
+  "transitions_zh": {
+    "sentence_starters": {
+      "name_en": "Sentence Starters",
+      "name_zh": "句首过渡词",
+      "words": [
+        "值得注意的是",
+        "需要指出的是",
+        "众所周知",
+        "不言而喻",
+        "毋庸置疑",
+        "显而易见",
+        "事实上",
+        "实际上",
+        "总的来说",
+        "综上所述",
+        "总而言之",
+        "由此可见",
+        "由此可知",
+        "不难发现",
+        "可以看出",
+        "从上述分析可以看出",
+        "根据上述分析"
+      ]
+    },
+    "sequence_markers": {
+      "name_en": "Sequence Markers",
+      "name_zh": "顺序标记词",
+      "words": [
+        "首先",
+        "其次",
+        "然后",
+        "接下来",
+        "最后",
+        "第一",
+        "第二",
+        "第三",
+        "一方面",
+        "另一方面"
+      ]
+    },
+    "emphasis_phrases": {
+      "name_en": "Emphasis Phrases",
+      "name_zh": "强调短语",
+      "words": [
+        "至关重要",
+        "极其重要",
+        "十分重要",
+        "非常重要",
+        "尤为重要",
+        "深入探讨",
+        "深入研究",
+        "深入分析",
+        "全面分析",
+        "系统分析",
+        "深刻影响",
+        "深远影响",
+        "重要意义",
+        "重大意义"
+      ]
+    },
+    "connector_phrases": {
+      "name_en": "Connector Phrases",
+      "name_zh": "连接短语",
+      "words": [
+        "与此同时",
+        "除此之外",
+        "此外",
+        "因此",
+        "因而",
+        "从而",
+        "进而",
+        "继而",
+        "有鉴于此",
+        "在此基础上",
+        "基于此",
+        "鉴于此"
+      ]
+    },
+    "template_patterns": {
+      "name_en": "Template Patterns",
+      "name_zh": "模板句式",
+      "patterns": [
+        "起着.*作用",
+        "具有.*意义",
+        "对于.*而言",
+        "从.*角度来看",
+        "在.*方面",
+        "通过.*可以",
+        "随着.*的发展"
+      ]
+    }
+  },
+  "transitions_en": {
+    "sentence_starters": {
+      "name_en": "Sentence Starters",
+      "name_zh": "句首过渡词",
+      "words": [
+        "It is worth noting that",
+        "It should be noted that",
+        "It is important to note that",
+        "Notably",
+        "Interestingly",
+        "Significantly",
+        "Importantly",
+        "Indeed",
+        "In fact",
+        "As a matter of fact",
+        "To summarize",
+        "To conclude",
+        "In conclusion",
+        "To sum up",
+        "All in all",
+        "In summary"
+      ]
+    },
+    "sequence_markers": {
+      "name_en": "Sequence Markers",
+      "name_zh": "顺序标记词",
+      "words": [
+        "Firstly",
+        "Secondly",
+        "Thirdly",
+        "Finally",
+        "Lastly",
+        "First of all",
+        "To begin with",
+        "Furthermore",
+        "Moreover",
+        "Additionally",
+        "In addition",
+        "On one hand",
+        "On the other hand"
+      ]
+    },
+    "emphasis_phrases": {
+      "name_en": "Emphasis Phrases",
+      "name_zh": "强调短语",
+      "words": [
+        "extremely important",
+        "crucially important",
+        "highly significant",
+        "of great significance",
+        "of paramount importance",
+        "plays a crucial role",
+        "plays a vital role",
+        "plays an important role",
+        "of utmost importance",
+        "profoundly impacts"
+      ]
+    },
+    "connector_phrases": {
+      "name_en": "Connector Phrases",
+      "name_zh": "连接短语",
+      "words": [
+        "Therefore",
+        "Thus",
+        "Hence",
+        "Consequently",
+        "As a result",
+        "For this reason",
+        "Accordingly",
+        "As such",
+        "In this regard",
+        "With this in mind",
+        "Given this",
+        "Based on this"
+      ]
+    }
+  },
+  "passive_markers_zh": [
+    "被",
+    "由...所",
+    "受到",
+    "得到",
+    "获得",
+    "遭到"
+  ],
+  "passive_patterns_zh": [
+    "被.*所",
+    "由.*所",
+    "受到.*的",
+    "得到.*的"
+  ],
+  "flat_list_zh": [
+    "值得注意的是", "需要指出的是", "众所周知", "不言而喻", "毋庸置疑",
+    "显而易见", "事实上", "实际上", "总的来说", "综上所述", "总而言之",
+    "由此可见", "由此可知", "不难发现", "可以看出",
+    "首先", "其次", "然后", "接下来", "最后",
+    "一方面", "另一方面", "与此同时", "除此之外", "此外",
+    "因此", "因而", "从而", "进而", "有鉴于此", "在此基础上",
+    "至关重要", "极其重要", "十分重要", "深入探讨", "深入研究",
+    "全面分析", "系统分析", "深刻影响", "深远影响", "重要意义"
+  ],
+  "flat_list_en": [
+    "It is worth noting that", "It should be noted that", "Notably", "Indeed",
+    "In fact", "To summarize", "In conclusion", "To sum up", "All in all",
+    "Firstly", "Secondly", "Thirdly", "Finally", "Furthermore", "Moreover",
+    "Additionally", "Therefore", "Thus", "Hence", "Consequently", "As a result",
+    "extremely important", "crucially important", "highly significant",
+    "plays a crucial role", "plays a vital role", "of paramount importance"
+  ]
+}

@@ -1,3 +1,6 @@
 PyMuPDF>=1.23.0
-spacy>=3.5.0
 jieba>=0.42.1
+onnxruntime>=1.16.0
+tokenizers>=0.14.0
+numpy>=1.24.0
+ufal.udpipe>=1.4.0.1
