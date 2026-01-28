@@ -1,7 +1,7 @@
 {
   "meta": {
-    "name": "ai_word_detector_uiux_tokens",
-    "version": "0.1"
+    "name": "tophumanwriting_uiux_tokens",
+    "version": "0.2"
   },
   "color": {
     "light": {
@@ -25,9 +25,16 @@
       "border": "#3a3a3a"
     },
     "accent": {
-      "default": "#3b82f6",
-      "hover": "#2563eb",
-      "pressed": "#1d4ed8"
+      "default": "#2f80ed",
+      "hover": "#2970d0",
+      "pressed": "#2159a7",
+      "presets": {
+        "ocean": "#2f80ed",
+        "crimson": "#e53935",
+        "teal": "#14b8a6",
+        "violet": "#7c3aed",
+        "slate": "#475569"
+      }
     },
     "semantic": {
       "success": "#16a34a",

@@ -17,15 +17,23 @@ dist/
 # Large offline assets (publish via GitHub Releases / LFS)
 models/
 release/
-
-# Built executable (publish via GitHub Releases)
-AIWordDetector.exe
+python/
+*.zip
+*.7z
+*.tar.gz
+*.gguf
+*.onnx
+*.safetensors
+*.pt
+*.pth
+*.bin
 
 # Local cleanup / trash
 trash/
 
 # Runtime cache (portable data folder)
 AIWordDetector_data/
+TopHumanWriting_data/
 
 # User data (vocabulary built from PDFs)
 vocabulary_data.json

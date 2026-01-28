@@ -31,7 +31,7 @@ if errorlevel 1 (
 )
 
 echo [2/2] 安装依赖...
-venv\Scripts\pip.exe install -r requirements.txt pyinstaller -q
+venv\Scripts\pip.exe install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 
 echo.
 echo ========================================
@@ -42,7 +42,7 @@ echo 已安装的包:
 venv\Scripts\pip.exe list
 echo.
 echo 使用方法:
-echo   run_dev.bat  - 运行程序(开发调试)
-echo   build.bat    - 打包成exe
+echo   run_web.bat          - 运行本地网页
+echo   build_release_web.bat - 生成 release zip（网页版）
 echo.
 pause

@@ -1,4 +1,4 @@
-# AI Word Detector | 领域文本怪异度检测器（范例语料库 + 离线模型）
+# TopHumanWriting | 顶级范文对齐写作（本地文档库 + 白箱证据 + 离线模型）
 
 [English](#english) | [中文](#中文)
 
@@ -6,149 +6,146 @@
 
 ## English
 
-AI Word Detector compares your text against **your own domain PDF library** (human-written exemplars) and highlights what looks *out-of-domain* or *AI-ish* from multiple angles:
+TopHumanWriting is an **offline local web app** for “aligning to top human exemplars”:
 
-- **Word rarity** (document frequency across your PDFs)
-- **Phrase/word-order rarity** (bigrams)
-- **Sentence diagnosis** (length/formatting + domain phrasing outliers)
-- **Semantic outliers (offline ONNX model)** with **exemplar sentences** + **PDF source**
-- **Syntax outliers (offline UDPipe, optional)** via POS-pattern statistics (requires rebuilding the library)
+- Build a local **PDF exemplar library** (50–100 PDFs, zh/en/mixed)
+- Retrieve top-k exemplar excerpts with **PDF + page** (FAISS, local)
+- Generate **white-box** polish: diagnosis + controlled rewrites + evidence quotes (Qwen 3B via llama.cpp)
+- Build a **citation pattern bank**: in-text citation sentences + references (white-box, searchable)
 
-### Quick Start (Offline Package)
+### Quick Start (Web)
 
-1. Unzip `release/AIWordDetector_*_offline.zip`
-2. Run `AIWordDetector.exe`
-3. Create/select a **Library**
-4. Click **Load PDF** and choose your domain paper folder (recursive)
-5. Paste text and click **Analyze**
+**Offline Release (unzip & run):**
 
-### Using “Sentence Diagnosis”
+1. Download the latest `TopHumanWriting_<version>_offline.zip` from GitHub Releases
+2. Unzip it
+3. Run `TopHumanWriting.vbs` (silent, recommended) or `run_web.bat` (debug)
+4. Your browser opens `http://127.0.0.1:7860` (default; auto-switch if occupied)
 
-- The diagnosis panel is **selectable/copyable** (drag to select → `Ctrl+C`)
-- Right-click a diagnosis item to:
-  - Copy sentence / diagnosis / reasons
-  - **Show Exemplars** (semantic nearest neighbors)
-  - Locate the sentence in results
-- **Zoom**: `Ctrl + Mouse Wheel` works in Input / Results / Sentence Diagnosis
-- **Sorting**: warnings first → more warnings → more important issue types (semantic > phrasing > syntax > …) → original order
+If it stays on the startup page, open `TopHumanWriting_data/logs/launch.log` (or run `run_web.bat` to see errors).
 
-### “Exemplar Sentences” with PDF Source
+**From source (dev):**
 
-When a sentence is flagged as a semantic outlier, the app shows an **exemplar** from your PDF library. If the library was built with source tracking, the exemplar line includes:
+1. Run `setup_env.bat` (once)
+2. Run `run_web.bat`
 
-`[relative/path/to/paper.pdf] exemplar sentence...`
+Main pages:
+- **Library**: create library → pick PDF folder → build index
+- **Align Scan**: find least-aligned sentences (retrieval only, no LLM)
+- **Align Polish**: show exemplars (C1..Ck) → generate white-box polish (Qwen via llama.cpp)
+- **Citations**: build/search citation sentence patterns + open PDFs + view References
+- **Local LLM**: one-click start & test (Preset: 8GB)
 
-In Sentence Diagnosis, the `PDF: ...` source part is highlighted in blue for quick scanning.
+### Offline LLM Assets
+
+Expected paths:
+- `models/llm/llama-server.exe`
+- `models/llm/qwen2.5-3b-instruct-q4_k_m.gguf`
+
+From source you can download them with `download_llm_assets.bat`.
 
 ### Data & Cache Location (Portable)
 
-By default, the app stores data next to the exe:
+By default, the app stores data next to the project folder:
 
-- `AIWordDetector_data/`
+- `TopHumanWriting_data/` (compatible with old `AIWordDetector_data/`)
   - `settings.json`
   - `libraries/*.json` (library stats)
   - `libraries/<name>.sentences.json` (semantic sentence records, includes PDF source)
   - `libraries/<name>.embeddings.npy` (semantic embeddings)
+  - `rag/<library>/` (RAG index)
+  - `cite/<library>/` (citation bank)
 
-Override with `AIWORDDETECTOR_DATA_DIR`.
+Override with `TOPHUMANWRITING_DATA_DIR` (or legacy `AIWORDDETECTOR_DATA_DIR`).
 
 ### Notes
 
 - If you replace the semantic model but keep an old index, results may look unchanged. The app will prompt to **rebuild the semantic index**.
 - Syntax analysis is optional; put UDPipe models in `models/syntax/` and rebuild the library.
 
-### Run from Source
+### Build Release Zip (Web)
 
-```bash
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-python ai_word_detector.py
-```
-
-### Build (Windows)
-
-```bat
-build.bat
-```
+Run `build_release_web.bat` to generate `release/TopHumanWriting_<version>_offline.zip`.
 
 ---
 
 ## 中文
 
-AI Word Detector 会把你的**领域 PDF 文档库**当作“人类范例语料库”，从多个维度找出你输入文本里“不像本领域写法/像 AI 的地方”，并解释原因：
+TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范文写法”的白箱写作：
 
-- **词频（按文档频率 DF）**：某个词在多少篇 PDF 里出现
-- **短语/语序（bigram）**：不常见搭配/不常见语序
-- **句子诊断**：句子层面的异常（领域短语偏离、模板痕迹、格式问题等）
-- **语义偏离（离线语义模型）**：给出最相似的**范句**并附带 **PDF 出处**
-- **句式偏离（UDPipe 离线，可选）**：对比语料库 POS 模式，标记不常见句式（需要重建文献库）
+- 你提供本地 PDF 范文库（50–100 篇，中英混合可）
+- 检索 top-k 范文片段并展示 **PDF + 页码**
+- 用本地 Qwen（llama.cpp）生成 **白箱** 输出：诊断 + 轻改/中改 + 范文证据引用
+- 从范文库抽取 **引用句式库**：正文 author-year 引用句子 + References，可检索可追溯
 
-### 离线包快速使用
+### 快速开始（网页）
 
-1. 解压 `release/AIWordDetector_*_offline.zip`
-2. 运行 `AIWordDetector.exe`
-3. 新建/选择一个**文献库**
-4. 点击 **加载PDF**，选择你的领域 PDF 文件夹（会递归扫描）
-5. 粘贴文本，点击 **分析**
+**离线发布包（解压即用）：**
 
-### 句子诊断怎么用
+1. 在 GitHub Releases 下载最新的 `TopHumanWriting_<version>_offline.zip`
+2. 解压
+3. 双击 `TopHumanWriting.vbs`（推荐：不弹黑窗口）或 `run_web.bat`（调试用）
+4. 浏览器会自动打开 `http://127.0.0.1:7860`（默认端口；若被占用会自动换端口）
 
-- 句子诊断面板支持**直接选择/复制**（拖拽选中 → `Ctrl+C`）
-- 右键诊断：复制句子/诊断/原因、**查看范句**、在结果中定位
-- **放大/缩小**：输入框/结果/句子诊断都支持 `Ctrl + 鼠标滚轮`
-- **排序逻辑**：先 warning → warning 数量 → 问题类型权重（语义 > 短语 > 句式 > …）→ 原文顺序
+如果一直停在启动页：打开 `TopHumanWriting_data/logs/launch.log`（或用 `run_web.bat` 看报错）。
 
-### 范句（含 PDF 出处）
+**源码运行（开发）：**
 
-当句子被判定为“语义偏离”时，会展示来自你的 PDF 文档库的**范句**。若文献库带有出处信息，会显示：
+1. 运行 `setup_env.bat`（首次一次）
+2. 运行 `run_web.bat`
 
-`[相对路径/论文.pdf] 范句内容...`
+主要页面：
+- **文献库**：建库/选 PDF 文件夹/建索引
+- **对齐扫描**：找出最不像范文的句子（仅检索，不调用 LLM）
+- **对齐润色**：展示范文证据（C1..Ck）→ 生成白箱润色（Qwen + llama.cpp）
+- **引用借鉴**：抽取/检索引用句式库 + 打开原 PDF + 查看 References
+- **本地 LLM**：一键启动&测试（推荐 8GB 预设）
 
-在句子诊断里，`PDF：...` 这一段会用蓝色高亮，方便快速定位出处。
+### 本地 LLM 资产
+
+默认读取：
+- `models/llm/llama-server.exe`
+- `models/llm/qwen2.5-3b-instruct-q4_k_m.gguf`
+
+源码模式可用 `download_llm_assets.bat` 自动下载。
 
 ### 数据与缓存位置（便于清理）
 
-默认放在 exe 同目录，便于一键删除清理：
+默认放在项目目录旁的可携带数据目录：
 
-- `AIWordDetector_data/`
+- `TopHumanWriting_data/`（兼容旧 `AIWordDetector_data/`）
   - `settings.json`
   - `libraries/*.json`
   - `libraries/<库名>.sentences.json`（范句记录，含 PDF 出处）
   - `libraries/<库名>.embeddings.npy`（语义向量）
+  - `rag/<库名>/`（RAG 检索索引）
+  - `cite/<库名>/`（引用句式库）
 
-可用环境变量 `AIWORDDETECTOR_DATA_DIR` 覆盖。
+可用环境变量 `TOPHUMANWRITING_DATA_DIR` 覆盖（旧的 `AIWORDDETECTOR_DATA_DIR` 也兼容）。
 
-### 源码运行/打包
+### 生成 Release Zip（网页版）
 
-```bash
-python -m venv venv
-venv\\Scripts\\activate
-pip install -r requirements.txt
-python ai_word_detector.py
-```
-
-```bat
-build.bat
-```
+运行 `build_release_web.bat` 会生成 `release/TopHumanWriting_<version>_offline.zip`。
 
 ---
 
 ## Project Structure | 项目结构
 
 ```
-ai-word-detector/
+TopHumanWriting/
+├── webapp/              # FastAPI backend + static frontend
+├── aiwd/                # RAG / llama-server / polish core
 ├── ai_word_detector.py
 ├── i18n.py
 ├── version.py
 ├── requirements.txt
-├── build.bat
 ├── setup_env.bat
-├── run_dev.bat
+├── run_web.bat
+├── build_release_web.bat
 ├── locales/
 ├── word_lists/
-├── models/              # offline models (in offline package)
-├── AIWordDetector_data/ # portable data/cache (runtime)
+├── models/              # offline models (llama.cpp + gguf + onnx)
+├── TopHumanWriting_data/ # portable data/cache (runtime)
 └── README.md
 ```
 

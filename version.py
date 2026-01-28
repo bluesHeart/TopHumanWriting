@@ -1,4 +1,4 @@
 # -*- coding: utf-8 -*-
-"""Version information for AI Word Detector"""
+"""Version information for TopHumanWriting"""
 
-VERSION = "2.7.3"
+VERSION = "2.8.3"

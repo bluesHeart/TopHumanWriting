@@ -4,3 +4,8 @@ onnxruntime>=1.16.0
 tokenizers>=0.14.0
 numpy>=1.24.0
 ufal.udpipe>=1.4.0.1
+llama-index-core==0.14.13
+llama-index-vector-stores-faiss==0.5.2
+faiss-cpu==1.13.2
+fastapi>=0.115.0
+uvicorn>=0.27.0

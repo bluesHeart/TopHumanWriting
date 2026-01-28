@@ -1,16 +1,36 @@
 # -*- coding: utf-8 -*-
 """
-AI Word Detector v2.7.2 - Domain Weirdness Analyzer
-Compare your text against a domain corpus (PDFs) to identify unusual words/phrases
-and sentence-level weirdness (domain outliers + AI-style patterns).
+TopHumanWriting v2.8.x - Exemplar Alignment Writing Assistant
+
+Build a local exemplar library (PDFs) and help users revise text to better match
+top human writing style with white-box evidence (PDF + page + quote).
 """
 
 import os
 import sys
 import json
 import re
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+try:
+    import tkinter as tk  # type: ignore
+    from tkinter import filedialog, messagebox, ttk  # type: ignore
+except Exception:  # pragma: no cover
+    # Portable/offline web releases bundle an embedded Python runtime that may not include tkinter.
+    # We keep the core (RAG/embedding/corpus) importable by providing lightweight stubs.
+    class _TkStub:
+        def __getattr__(self, name: str):
+            if name and name.isupper():
+                return name
+
+            class _Widget:
+                def __init__(self, *args, **kwargs):
+                    raise RuntimeError("tkinter is not available in this runtime")
+
+            return _Widget
+
+    tk = _TkStub()  # type: ignore
+    filedialog = _TkStub()  # type: ignore
+    messagebox = _TkStub()  # type: ignore
+    ttk = _TkStub()  # type: ignore
 from collections import Counter
 import threading
 from pathlib import Path
@@ -22,6 +42,23 @@ import shutil
 
 from version import VERSION
 from i18n import get_i18n, t, set_language, get_language
+
+try:
+    from aiwd.rag_index import RagIndexer, RagIndexError
+except Exception:
+    RagIndexer = None
+    RagIndexError = Exception
+
+try:
+    from aiwd.llama_server import LlamaServerConfig, LlamaServerProcess
+    from aiwd.polish import build_polish_prompt, extract_json, validate_polish_json, PolishValidationError
+except Exception:
+    LlamaServerConfig = None
+    LlamaServerProcess = None
+    build_polish_prompt = None
+    extract_json = None
+    validate_polish_json = None
+    PolishValidationError = Exception
 
 
 # Font configuration - clean, readable fonts
@@ -133,11 +170,17 @@ def get_settings_dir():
     if _SETTINGS_DIR:
         return _SETTINGS_DIR
 
-    env_dir = os.environ.get("AIWORDDETECTOR_DATA_DIR", "").strip()
-    preferred = env_dir or os.path.join(get_app_dir(), "AIWordDetector_data")
+    env_dir = (os.environ.get("TOPHUMANWRITING_DATA_DIR", "") or "").strip() or (os.environ.get("AIWORDDETECTOR_DATA_DIR", "") or "").strip()
+    default_new = os.path.join(get_app_dir(), "TopHumanWriting_data")
+    default_old = os.path.join(get_app_dir(), "AIWordDetector_data")
+    if env_dir:
+        preferred = env_dir
+    else:
+        preferred = default_old if os.path.exists(default_old) and not os.path.exists(default_new) else default_new
 
     appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
-    legacy_dir = os.path.join(appdata, 'AIWordDetector')
+    legacy_dir = os.path.join(appdata, 'TopHumanWriting')
+    legacy_dir_old = os.path.join(appdata, 'AIWordDetector')
 
     def _ensure_writable_dir(path: str) -> bool:
         try:
@@ -192,11 +235,15 @@ def get_settings_dir():
 
     # Prefer portable (exe directory) when writable; fallback to AppData.
     if _ensure_writable_dir(preferred):
+        _migrate_legacy(legacy_dir_old, preferred)
         _migrate_legacy(legacy_dir, preferred)
+        if not env_dir and os.path.abspath(preferred) == os.path.abspath(default_new):
+            _migrate_legacy(default_old, preferred)
         _SETTINGS_DIR = preferred
         return _SETTINGS_DIR
 
     os.makedirs(legacy_dir, exist_ok=True)
+    _migrate_legacy(legacy_dir_old, legacy_dir)
     _SETTINGS_DIR = legacy_dir
     return _SETTINGS_DIR
 
@@ -216,15 +263,33 @@ try:
 except ImportError:
     np = None
 
-try:
-    import onnxruntime as ort
-except ImportError:
-    ort = None
+# Heavy deps are imported lazily to speed up web startup (especially under Windows Defender).
+ort = None
+Tokenizer = None
 
-try:
-    from tokenizers import Tokenizer
-except ImportError:
-    Tokenizer = None
+
+def _lazy_import_onnxruntime():
+    global ort
+    if ort is not None:
+        return ort
+    try:
+        import onnxruntime as _ort  # type: ignore
+        ort = _ort
+    except Exception:
+        ort = None
+    return ort
+
+
+def _lazy_import_tokenizers():
+    global Tokenizer
+    if Tokenizer is not None:
+        return Tokenizer
+    try:
+        from tokenizers import Tokenizer as _Tokenizer  # type: ignore
+        Tokenizer = _Tokenizer
+    except Exception:
+        Tokenizer = None
+    return Tokenizer
 
 try:
     from ufal.udpipe import Model as UDPipeModel
@@ -776,7 +841,17 @@ class Theme:
     BORDER = LIGHT['BORDER']
 
     # Accent colors (same for both themes)
-    PRIMARY = "#3b82f6"
+    ACCENTS = {
+        # Youdao-like: clean UI + vivid accent (not necessarily red)
+        "ocean": "#2f80ed",
+        "crimson": "#e53935",
+        "teal": "#14b8a6",
+        "violet": "#7c3aed",
+        "slate": "#475569",
+    }
+    ACCENT_ORDER = ["ocean", "crimson", "teal", "violet", "slate"]
+
+    PRIMARY = ACCENTS["ocean"]
     PRIMARY_HOVER = "#2563eb"
     PRIMARY_DARK = "#1d4ed8"
 
@@ -807,6 +882,62 @@ class Theme:
             cls.SUCCESS = "#16a34a"
             cls.NORMAL_COLOR = "#525252"
 
+    @staticmethod
+    def _clamp8(x: float) -> int:
+        try:
+            return max(0, min(255, int(round(float(x)))))
+        except Exception:
+            return 0
+
+    @classmethod
+    def _hex_to_rgb(cls, s: str) -> Tuple[int, int, int]:
+        s = (s or "").strip()
+        if s.startswith("#"):
+            s = s[1:]
+        if len(s) == 3:
+            s = "".join([ch * 2 for ch in s])
+        if len(s) != 6:
+            raise ValueError("invalid hex color")
+        r = int(s[0:2], 16)
+        g = int(s[2:4], 16)
+        b = int(s[4:6], 16)
+        return r, g, b
+
+    @staticmethod
+    def _rgb_to_hex(r: int, g: int, b: int) -> str:
+        return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+
+    @classmethod
+    def _mix(cls, base_hex: str, target_rgb: Tuple[int, int, int], t: float) -> str:
+        r, g, b = cls._hex_to_rgb(base_hex)
+        tr, tg, tb = target_rgb
+        tt = max(0.0, min(1.0, float(t or 0.0)))
+        rr = cls._clamp8(r * (1.0 - tt) + tr * tt)
+        gg = cls._clamp8(g * (1.0 - tt) + tg * tt)
+        bb = cls._clamp8(b * (1.0 - tt) + tb * tt)
+        return cls._rgb_to_hex(rr, gg, bb)
+
+    @classmethod
+    def _darken(cls, base_hex: str, t: float) -> str:
+        return cls._mix(base_hex, (0, 0, 0), t)
+
+    @classmethod
+    def set_accent(cls, accent: str):
+        raw = (accent or "").strip()
+        key = raw.lower()
+        base = (cls.ACCENTS.get(key, raw) or "").strip()
+        if not base:
+            base = cls.ACCENTS.get("ocean", "#2f80ed")
+        if not base.startswith("#"):
+            base = "#" + base
+        try:
+            cls._hex_to_rgb(base)
+        except Exception:
+            base = cls.ACCENTS.get("ocean", "#2f80ed")
+        cls.PRIMARY = base
+        cls.PRIMARY_HOVER = cls._darken(base, 0.14)
+        cls.PRIMARY_DARK = cls._darken(base, 0.28)
+
 
 class LanguageDetector:
     @staticmethod
@@ -834,7 +965,31 @@ class Settings:
         self._settings = self._load_settings()
 
     def _load_settings(self) -> dict:
-        defaults = {'language': 'en', 'font_size': 13, 'dark_mode': False}
+        defaults = {
+            'language': 'en',
+            'font_size': 13,
+            'dark_mode': False,
+            'accent': 'ocean',
+            # RAG (exemplar retrieval) defaults
+            'rag_top_k': 8,
+            # Local LLM (llama.cpp server) defaults
+            'llm_enabled': True,
+            'llm_model_path': '',
+            'llm_server_path': '',
+             'llm_ctx_size': 2048,
+             'llm_threads': 4,
+             'llm_ngl': 0,
+             'llm_temperature': 0.0,
+             'llm_max_tokens': 900,
+             'llm_json_retries': 2,
+             'llm_exemplar_max_chars': 420,
+             # Alignment scan defaults
+             'align_scan_max_items': 220,
+             # Guardrail: reject rewrites that drift too far from the selected text (cosine similarity).
+             'llm_min_similarity_light': 0.88,
+             'llm_min_similarity_medium': 0.82,
+             'llm_sleep_idle_seconds': 300,
+         }
         try:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
@@ -1788,6 +1943,8 @@ class SemanticEmbedder:
     """Multilingual sentence embedder backed by a local ONNX model."""
 
     def __init__(self, model_dir: str, model_id: str = ""):
+        _lazy_import_onnxruntime()
+        _lazy_import_tokenizers()
         missing = []
         if np is None:
             missing.append("numpy")
@@ -2861,6 +3018,10 @@ class ModernApp:
         # Load and apply theme
         self.dark_mode = self.settings.get('dark_mode', False)
         Theme.set_mode(self.dark_mode)
+        try:
+            Theme.set_accent(self.settings.get("accent", "ocean") or "ocean")
+        except Exception:
+            pass
 
         saved_lang = self.settings.get('language', 'en')
         set_language(saved_lang)
@@ -2894,6 +3055,16 @@ class ModernApp:
         self.last_weirdness = {}
         self.stats_view = 'words'  # 'words' | 'phrases'
 
+        # Exemplar retrieval (RAG for alignment polishing)
+        try:
+            self.rag_top_k = int(self.settings.get("rag_top_k", 8) or 8)
+        except Exception:
+            self.rag_top_k = 8
+        self._last_rag_results = []
+        self._rag_session = None
+        self._rag_session_slug = ""
+        self._rag_session_lock = threading.Lock()
+
         # Style analysis
         self.style_analyzer = None
         self._all_sentence_diagnoses = []
@@ -2925,6 +3096,7 @@ class ModernApp:
             self.root.after(300, lambda: self._require_semantic_model())
 
         self._status_flash_after_id = None
+        self._llama_server_proc = None
 
         # Long-running task state (PDF processing / semantic indexing)
         self._busy = False
@@ -3276,6 +3448,24 @@ class ModernApp:
                                     bg=Theme.BG_SECONDARY, fg=Theme.SUCCESS)
         self.status_label.pack(side=tk.LEFT, padx=(0, 20))
 
+        # LLM status badge (local model availability / running)
+        self._widgets['llm_badge'] = tk.Label(
+            right_controls,
+            text=t("llm.badge.loading"),
+            font=(FONT_UI, 10, "bold"),
+            bg=Theme.BG_TERTIARY,
+            fg=Theme.TEXT_MUTED,
+            padx=10,
+            pady=4,
+            cursor="hand2",
+        )
+        self._widgets['llm_badge'].pack(side=tk.LEFT, padx=(0, 20))
+        try:
+            self._widgets['llm_badge'].bind("<Button-1>", lambda _e: self.open_llm_manager_window())
+        except Exception:
+            pass
+        self._widgets['tt_llm_badge'] = ToolTip(self._widgets['llm_badge'], text=t("llm.tip.loading"))
+
         # Language selector (styled)
         lang_frame = tk.Frame(right_controls, bg=Theme.BG_TERTIARY)
         lang_frame.pack(side=tk.LEFT, padx=(0, 12))
@@ -3310,6 +3500,20 @@ class ModernApp:
         self._widgets['btn_theme'] = IconButton(right_controls, theme_icon,
                                                 self.toggle_theme, width=28, height=28)
         self._widgets['btn_theme'].pack(side=tk.LEFT, padx=(12, 0))
+
+        # Accent picker (colored dot)
+        self._widgets['btn_accent'] = IconButton(
+            right_controls,
+            "",
+            self.open_appearance_window,
+            width=28,
+            height=28,
+            bg=Theme.PRIMARY,
+            hover_bg=Theme.PRIMARY_HOVER,
+            fg="white",
+        )
+        self._widgets['btn_accent'].pack(side=tk.LEFT, padx=(8, 0))
+        self._widgets['tt_accent'] = ToolTip(self._widgets['btn_accent'], text=t("theme.tip"))
 
         # ========== Toolbar ==========
         toolbar = tk.Frame(self.root, bg=Theme.BG_PRIMARY, height=50)
@@ -3443,9 +3647,47 @@ class ModernApp:
         except Exception:
             pass
 
+        # ========== Workspace (Sidebar + Main) ==========
+        workspace = tk.Frame(self.root, bg=Theme.BG_PRIMARY)
+        self._workspace = workspace
+        workspace.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+
+        sidebar = tk.Frame(workspace, bg=Theme.BG_SECONDARY, width=180)
+        sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        try:
+            sidebar.pack_propagate(False)
+        except Exception:
+            pass
+
+        sidebar_title = tk.Frame(sidebar, bg=Theme.BG_SECONDARY)
+        sidebar_title.pack(fill=tk.X, padx=14, pady=(14, 10))
+        tk.Frame(sidebar_title, bg=Theme.PRIMARY, width=4, height=18).pack(side=tk.LEFT, padx=(0, 8))
+        self._widgets["sidebar_title"] = tk.Label(
+            sidebar_title,
+            text=t("sidebar.title"),
+            font=(FONT_UI, 11, "bold"),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_PRIMARY,
+        )
+        self._widgets["sidebar_title"].pack(side=tk.LEFT)
+
+        def _sb_btn(key: str, cmd, accent: bool = False):
+            b = ModernButton(sidebar, t(key), cmd, width=150, height=34, font_size=10, accent=accent)
+            b.pack(fill=tk.X, padx=14, pady=6)
+            return b
+
+        self._widgets["sidebar_btn_load_pdf"] = _sb_btn("toolbar.load_pdf", self.select_pdf_folder)
+        self._widgets["sidebar_btn_analyze"] = _sb_btn("panel.analyze", self.analyze_text, accent=True)
+        self._widgets["sidebar_btn_align_scan"] = _sb_btn("panel.align_scan", self.open_align_scan_window)
+        self._widgets["sidebar_btn_polish"] = _sb_btn("panel.polish", self.open_polish_window)
+        self._widgets["sidebar_btn_llm"] = _sb_btn("sidebar.btn.llm", self.open_llm_manager_window)
+
+        main_host = tk.Frame(workspace, bg=Theme.BG_PRIMARY)
+        main_host.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(16, 0))
+
         # ========== Main Split (Content + Bottom) ==========
         main_split = tk.PanedWindow(
-            self.root,
+            main_host,
             orient=tk.VERTICAL,
             bg=Theme.BG_PRIMARY,
             sashwidth=8,
@@ -3453,7 +3695,7 @@ class ModernApp:
             borderwidth=0,
         )
         self._main_split = main_split
-        main_split.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        main_split.pack(fill=tk.BOTH, expand=True)
 
         # Top: Main content area (Input + Results)
         content = tk.Frame(main_split, bg=Theme.BG_PRIMARY)
@@ -3501,6 +3743,28 @@ class ModernApp:
                     self.analyze_text, width=90, height=36, font_size=11, accent=True)
         self._widgets['btn_detect'].pack(side=tk.RIGHT)
 
+        self._widgets['btn_align_scan'] = ModernButton(
+            left_header,
+            t("panel.align_scan"),
+            self.open_align_scan_window,
+            width=110,
+            height=36,
+            font_size=11,
+            accent=False,
+        )
+        self._widgets['btn_align_scan'].pack(side=tk.RIGHT, padx=(0, 10))
+
+        self._widgets['btn_polish'] = ModernButton(
+            left_header,
+            t("panel.polish"),
+            self.open_polish_window,
+            width=90,
+            height=36,
+            font_size=11,
+            accent=False,
+        )
+        self._widgets['btn_polish'].pack(side=tk.RIGHT, padx=(0, 10))
+
         self._widgets['lang_indicator'] = tk.Label(left_header, text="",
                 font=(FONT_UI, 10),
                 bg=Theme.BG_SECONDARY, fg=Theme.WARNING)
@@ -3511,6 +3775,7 @@ class ModernApp:
         input_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
 
         self.input_text = tk.Text(input_frame, wrap=tk.CHAR,
+                                  undo=True, autoseparators=True, maxundo=-1,
                                   font=(FONT_MONO, self.font_size),
                                   bg=Theme.BG_INPUT, fg=Theme.TEXT_PRIMARY,
                                   insertbackground=Theme.TEXT_PRIMARY,
@@ -3836,6 +4101,12 @@ class ModernApp:
         try:
             self.diag_text.tag_configure("diag_placeholder", font=(FONT_UI, diag_font), foreground=Theme.TEXT_MUTED)
             self.diag_text.insert("1.0", t("style.placeholder"), ("diag_placeholder",))
+        except Exception:
+            pass
+
+        # Update global LLM badge after UI is ready.
+        try:
+            self._update_llm_badge()
         except Exception:
             pass
 
@@ -4434,6 +4705,24 @@ class ModernApp:
         self._widgets['btn_load_pdf'].set_text(t("toolbar.load_pdf"))
         self._widgets['btn_show_vocab'].set_text(t("toolbar.show_vocab"))
         self._widgets['btn_detect'].set_text(t("panel.analyze"))
+        if self._widgets.get('btn_align_scan'):
+            self._widgets['btn_align_scan'].set_text(t("panel.align_scan"))
+        if self._widgets.get('btn_polish'):
+            self._widgets['btn_polish'].set_text(t("panel.polish"))
+        if self._widgets.get("sidebar_btn_load_pdf"):
+            self._widgets["sidebar_btn_load_pdf"].set_text(t("toolbar.load_pdf"))
+        if self._widgets.get("sidebar_btn_analyze"):
+            self._widgets["sidebar_btn_analyze"].set_text(t("panel.analyze"))
+        if self._widgets.get("sidebar_btn_align_scan"):
+            self._widgets["sidebar_btn_align_scan"].set_text(t("panel.align_scan"))
+        if self._widgets.get("sidebar_btn_polish"):
+            self._widgets["sidebar_btn_polish"].set_text(t("panel.polish"))
+        if self._widgets.get("sidebar_btn_llm"):
+            self._widgets["sidebar_btn_llm"].set_text(t("sidebar.btn.llm"))
+        if self._widgets.get("sidebar_title"):
+            self._widgets["sidebar_title"].config(text=t("sidebar.title"))
+        if self._widgets.get("tt_accent"):
+            self._widgets["tt_accent"].text = t("theme.tip")
         self._widgets['input_title'].config(text=t("panel.input_title"))
         self._widgets['result_title'].config(text=t("panel.result_title"))
         self._widgets['stats_title'].config(text=t("stats.panel_title"))
@@ -4488,6 +4777,11 @@ class ModernApp:
                 fg=Theme.SUCCESS
             )
 
+        try:
+            self._update_llm_badge()
+        except Exception:
+            pass
+
         # Progress panel (if visible)
         if self._widgets.get('btn_cancel_task'):
             if self._busy and self._cancel_event is not None and getattr(self._cancel_event, "is_set", lambda: False)():
@@ -4533,6 +4827,46 @@ class ModernApp:
         except Exception:
             pass
 
+    def _rebuild_ui(self, *, preserve_input: bool = True):
+        input_content = ""
+        input_is_onboarding = False
+        try:
+            if preserve_input and getattr(self, "input_text", None) is not None:
+                input_content = self.input_text.get("1.0", tk.END)
+                cur = (input_content or "").strip()
+                input_is_onboarding = cur.startswith("📚") or cur.startswith("Welcome")
+        except Exception:
+            input_content = ""
+            input_is_onboarding = False
+
+        # Destroy all widgets and rebuild UI
+        try:
+            for widget in self.root.winfo_children():
+                widget.destroy()
+        except Exception:
+            pass
+
+        self._widgets = {}
+        self.create_ui()
+
+        try:
+            self.load_vocabulary()
+        except Exception:
+            pass
+
+        if preserve_input and input_content and not input_is_onboarding:
+            try:
+                self.input_text.delete("1.0", tk.END)
+                self.input_text.insert("1.0", (input_content or "").strip())
+                self.input_text.config(fg=Theme.TEXT_PRIMARY)
+            except Exception:
+                pass
+
+        try:
+            self.refresh_ui()
+        except Exception:
+            pass
+
     def toggle_theme(self):
         """Toggle between light and dark theme"""
         if self._busy:
@@ -4541,22 +4875,103 @@ class ModernApp:
         self.dark_mode = not self.dark_mode
         self.settings.set('dark_mode', self.dark_mode)
         Theme.set_mode(self.dark_mode)
+        self._rebuild_ui(preserve_input=True)
 
-        # Save current input text
-        input_content = self.input_text.get("1.0", tk.END)
+    def open_appearance_window(self):
+        if self._busy:
+            messagebox.showwarning(t("msg.warning"), t("progress.busy_message"))
+            return
 
-        # Destroy all widgets and rebuild UI
-        for widget in self.root.winfo_children():
-            widget.destroy()
+        win = tk.Toplevel(self.root)
+        win.title(t("theme.window_title"))
+        win.geometry("560x420")
+        win.configure(bg=Theme.BG_PRIMARY)
 
-        self._widgets = {}
-        self.create_ui()
+        header = tk.Frame(win, bg=Theme.BG_SECONDARY)
+        header.pack(fill=tk.X, padx=16, pady=(16, 10))
 
-        # Restore input text
-        self.input_text.insert("1.0", input_content.strip())
+        tk.Label(
+            header,
+            text=t("theme.window_title"),
+            font=(FONT_UI, 13, "bold"),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_PRIMARY,
+        ).pack(side=tk.LEFT)
 
-        # Update status
-        self.load_vocabulary()
+        btn_close = ModernButton(header, t("theme.btn.close"), command=win.destroy, width=84, height=32, font_size=10)
+        btn_close.pack(side=tk.RIGHT)
+
+        body = tk.Frame(win, bg=Theme.BG_PRIMARY)
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+
+        card = tk.Frame(body, bg=Theme.BG_SECONDARY)
+        card.pack(fill=tk.BOTH, expand=True)
+
+        top = tk.Frame(card, bg=Theme.BG_SECONDARY)
+        top.pack(fill=tk.X, padx=16, pady=(12, 8))
+
+        tk.Label(top, text=t("theme.section.accent"), font=(FONT_UI, 11, "bold"), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_PRIMARY).pack(side=tk.LEFT)
+        tk.Label(top, text=t("theme.hint"), font=(FONT_UI, 10), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_MUTED).pack(side=tk.LEFT, padx=12)
+
+        grid = tk.Frame(card, bg=Theme.BG_SECONDARY)
+        grid.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+
+        current = (self.settings.get("accent", "ocean") or "ocean").strip().lower()
+
+        def _apply(accent_id: str):
+            accent_id = (accent_id or "").strip().lower()
+            if not accent_id:
+                return
+            try:
+                self.settings.set("accent", accent_id)
+            except Exception:
+                pass
+            try:
+                Theme.set_accent(accent_id)
+            except Exception:
+                pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self._rebuild_ui(preserve_input=True)
+
+        # Two-column preset grid (Youdao-like quick pick)
+        cols = 2
+        for idx, accent_id in enumerate(list(getattr(Theme, "ACCENT_ORDER", []) or [])):
+            color = (getattr(Theme, "ACCENTS", {}) or {}).get(accent_id, Theme.PRIMARY)
+            name = t(f"theme.accent.{accent_id}")
+
+            cell = tk.Frame(grid, bg=Theme.BG_INPUT)
+            r = idx // cols
+            c = idx % cols
+            cell.grid(row=r, column=c, sticky="nsew", padx=8, pady=8, ipadx=10, ipady=10)
+            grid.grid_columnconfigure(c, weight=1)
+
+            sw = tk.Canvas(cell, width=22, height=22, bg=Theme.BG_INPUT, highlightthickness=0)
+            sw.pack(side=tk.LEFT, padx=(0, 10))
+            sw.create_oval(2, 2, 20, 20, fill=color, outline="")
+            if accent_id == current:
+                sw.create_oval(1, 1, 21, 21, outline=Theme.TEXT_PRIMARY, width=2)
+
+            text = tk.Frame(cell, bg=Theme.BG_INPUT)
+            text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            tk.Label(text, text=name, font=(FONT_UI, 10, "bold"), bg=Theme.BG_INPUT, fg=Theme.TEXT_PRIMARY).pack(anchor="w")
+            tk.Label(text, text=color, font=(FONT_UI, 9), bg=Theme.BG_INPUT, fg=Theme.TEXT_MUTED).pack(anchor="w")
+
+            if accent_id == current:
+                tk.Label(cell, text="✓", font=(FONT_UI, 12, "bold"), bg=Theme.BG_INPUT, fg=Theme.SUCCESS).pack(side=tk.RIGHT, padx=(10, 0))
+
+            def _bind_click(w, aid=accent_id):
+                try:
+                    w.bind("<Button-1>", lambda _e, a=aid: _apply(a))
+                except Exception:
+                    pass
+
+            _bind_click(cell)
+            _bind_click(sw)
+            _bind_click(text)
+
 
     def update_library_dropdown(self):
         """Update library dropdown with available libraries"""
@@ -4685,11 +5100,22 @@ class ModernApp:
         base = os.path.splitext(lib_path)[0] if lib_path else ""
         has_semantic_index = bool(base) and os.path.exists(base + ".sentences.json") and os.path.exists(base + ".embeddings.npy")
         semantic_status = t("semantic.index_ready") if has_semantic_index else t("semantic.index_missing")
+        try:
+            slug = self._rag_library_slug()
+        except Exception:
+            slug = ""
+        rag_ok = False
+        try:
+            rag_ok = bool(slug) and os.path.exists(os.path.join(get_settings_dir(), "rag", slug, "storage", "docstore.json"))
+        except Exception:
+            rag_ok = False
+        rag_status = t("rag.index_ready") if rag_ok else t("rag.index_missing")
         msg = t("library.info_message",
                name=info['name'],
                doc_count=info['doc_count'],
                word_count=f"{info['word_count']:,}",
                semantic=semantic_status,
+               rag=rag_status,
                path=info['path'])
         messagebox.showinfo(t("library.info_title"), msg)
 
@@ -4765,9 +5191,14 @@ class ModernApp:
                 opts = dict(getattr(self, "_progress_panel_pack_opts", {}) or {})
                 # If we hid it via pack_forget, re-packing would append it to the end.
                 # Insert it back above the main split so it stays under the toolbar.
-                main_split = getattr(self, "_main_split", None)
-                if main_split is not None and getattr(main_split, "winfo_exists", lambda: 0)():
-                    opts["before"] = main_split
+                ref = getattr(self, "_workspace", None)
+                if ref is None or not getattr(ref, "winfo_exists", lambda: 0)():
+                    ref = getattr(self, "_main_split", None)
+                try:
+                    if ref is not None and getattr(ref, "winfo_exists", lambda: 0)() and getattr(ref, "master", None) == getattr(self._progress_panel, "master", None):
+                        opts["before"] = ref
+                except Exception:
+                    pass
                 self._progress_panel.pack(**opts)
         except Exception:
             pass
@@ -4930,6 +5361,20 @@ class ModernApp:
             stage_text = t("progress.build.step_syntax")
             note_text = t("progress.note.syntax")
             detail_text = t("progress.build.detail_syntax", current=done_i, total=total_i)
+        elif stage == "rag_extract":
+            stage_text = t("progress.build.step_rag_extract")
+            note_text = t("progress.note.rag")
+            filename = (detail or "").strip().replace("\n", " ")
+            if len(filename) > 48:
+                filename = filename[:47] + "…"
+            if filename:
+                detail_text = t("progress.build.detail_rag_pdf", current=done_i, total=total_i, filename=filename)
+            else:
+                detail_text = t("progress.build.detail_rag_pdf_count", current=done_i, total=total_i)
+        elif stage == "rag_embed":
+            stage_text = t("progress.build.step_rag_embed")
+            note_text = t("progress.note.rag")
+            detail_text = t("progress.build.detail_rag_embed", current=done_i, total=total_i)
         else:
             stage_text = ""
             note_text = ""
@@ -4951,7 +5396,7 @@ class ModernApp:
             self._widgets['progress_note'].config(text=note_text)
             if self._widgets.get('progress_bar'):
                 bar = self._widgets['progress_bar']
-                want_ind = bool(total_i > 0 and done_i <= 0 and stage in ("extract", "embed", "syntax"))
+                want_ind = bool(total_i > 0 and done_i <= 0 and stage in ("extract", "embed", "syntax", "rag_extract", "rag_embed"))
                 if hasattr(bar, "set_indeterminate"):
                     bar.set_indeterminate(want_ind)
                 bar.set_progress(frac, animate=not want_ind)
@@ -4971,6 +5416,10 @@ class ModernApp:
             except Exception:
                 pass
             try:
+                self._stop_llm_proc()
+            except Exception:
+                pass
+            try:
                 self.root.after(120, self.root.destroy)
             except Exception:
                 try:
@@ -4979,6 +5428,10 @@ class ModernApp:
                     pass
             return
 
+        try:
+            self._stop_llm_proc()
+        except Exception:
+            pass
         try:
             self.root.destroy()
         except Exception:
@@ -5069,6 +5522,30 @@ class ModernApp:
                 )
                 ui(lambda c=current, tt=total: self._update_task_progress_ui("syntax", c, tt, ""))
 
+            def rag_progress(stage: str, done: int, total: int, detail: str):
+                stage = (stage or "").strip()
+                if stage == "rag_extract":
+                    safe_name = (detail or "").strip().replace("\n", " ")
+                    short_name = safe_name
+                    if len(short_name) > 32:
+                        short_name = "…" + short_name[-31:]
+                    ui_set_status(
+                        t("status.rag_extract", current=done, total=total, filename=short_name),
+                        Theme.WARNING,
+                    )
+                    ui(lambda c=done, tt=total, f=detail: self._update_task_progress_ui("rag_extract", c, tt, f))
+                    return
+
+                if stage == "rag_embed":
+                    ui_set_status(
+                        t("status.rag_embed", current=done, total=total),
+                        Theme.WARNING,
+                    )
+                    ui(lambda c=done, tt=total: self._update_task_progress_ui("rag_embed", c, tt, ""))
+                    return
+
+                # final / unknown stage: just keep current UI
+
             try:
                 ui_set_status(t("status.starting"), Theme.WARNING)
                 count = self.corpus.process_pdf_folder(
@@ -5083,6 +5560,70 @@ class ModernApp:
                 if cancel_event.is_set():
                     raise CancelledError()
 
+                # Build exemplar retrieval index (RAG) for alignment polishing.
+                rag_err = ""
+                try:
+                    rag = self._rag_indexer()
+                    if rag is not None and self.semantic_embedder is not None:
+                        def rag_embed_sentences(texts, progress_cb2, cancel_cb2):
+                            def _report(done, total):
+                                if progress_cb2:
+                                    try:
+                                        progress_cb2(done, total)
+                                    except Exception:
+                                        pass
+                            return self.semantic_embedder.embed(
+                                texts,
+                                batch_size=SEMANTIC_EMBED_BATCH,
+                                progress_callback=_report,
+                                progress_every_s=SEMANTIC_PROGRESS_EVERY_S,
+                                cancel_event=cancel_event,
+                            )
+
+                        def rag_embed_query(q: str):
+                            vecs = self.semantic_embedder.embed(
+                                [q],
+                                batch_size=1,
+                                progress_callback=None,
+                                progress_every_s=0.0,
+                                cancel_event=cancel_event,
+                            )
+                            try:
+                                return vecs[0]
+                            except Exception:
+                                return vecs
+
+                        rag.build(
+                            folder,
+                            embed_sentences=rag_embed_sentences,
+                            embed_query=rag_embed_query,
+                            progress_cb=rag_progress,
+                            cancel_cb=cancel_event.is_set,
+                        )
+                        try:
+                            self._rag_session = None
+                            self._rag_session_slug = ""
+                        except Exception:
+                            pass
+
+                        # Persist PDF root per library for future rebuild prompts.
+                        try:
+                            roots = self.settings.get("rag_pdf_roots", {})
+                            if not isinstance(roots, dict):
+                                roots = {}
+                            roots[self._rag_library_slug()] = folder
+                            self.settings.set("rag_pdf_roots", roots)
+                        except Exception:
+                            pass
+                except RagIndexError as e:
+                    if cancel_event.is_set():
+                        raise CancelledError()
+                    rag_err = str(e)
+                except Exception as e:
+                    if cancel_event.is_set():
+                        raise CancelledError()
+                    rag_err = str(e)
+
                 self.corpus.save_vocabulary()
                 # Reset semantic index cache
                 self.semantic_index = None
@@ -5093,6 +5634,8 @@ class ModernApp:
                     Theme.SUCCESS,
                 )
                 ui(lambda: self._finish_task_ui())
+                if rag_err:
+                    ui(lambda err=rag_err: messagebox.showwarning(t("msg.warning"), t("msg.rag_build_failed", error=err)))
                 ui(lambda: messagebox.showinfo(t("msg.complete"), t("msg.success_process", count=count)))
             except CancelledError:
                 try:
@@ -5225,6 +5768,1614 @@ class ModernApp:
                     bg=row_bg, fg=color, width=col_widths[4], anchor='w')
             lbl.pack(side=tk.LEFT, padx=10, pady=6)
             lbl.bind("<MouseWheel>", lambda e: self.stats_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+    def _rag_library_slug(self) -> str:
+        if not self.current_library:
+            return ""
+        try:
+            lib_path = self.library_manager.get_library_path(self.current_library)
+            slug = os.path.splitext(os.path.basename(lib_path))[0]
+            return slug or str(self.current_library or "").strip()
+        except Exception:
+            return str(self.current_library or "").strip()
+
+    def _rag_indexer(self):
+        if RagIndexer is None:
+            return None
+        slug = self._rag_library_slug()
+        if not slug:
+            return None
+        try:
+            return RagIndexer(data_dir=get_settings_dir(), library_name=slug)
+        except Exception:
+            return None
+
+    def _rag_index_ready(self) -> bool:
+        ix = self._rag_indexer()
+        if ix is None:
+            return False
+        try:
+            return os.path.exists(os.path.join(ix.storage_dir, "docstore.json"))
+        except Exception:
+            return False
+
+    def _get_selected_input_range(self) -> Tuple[str, str, str, bool]:
+        w = getattr(self, "input_text", None)
+        if w is None:
+            return "", "1.0", "1.0", False
+        try:
+            start = w.index("sel.first")
+            end = w.index("sel.last")
+            text = w.get(start, end)
+            return (text or "").strip(), start, end, True
+        except Exception:
+            pass
+        try:
+            idx = w.index("insert")
+            start = w.index(f"{idx} linestart")
+            end = w.index(f"{idx} lineend")
+            text = w.get(start, end)
+            return (text or "").strip(), start, end, False
+        except Exception:
+            return "", "1.0", "1.0", False
+
+    def _rag_embed_query(self, text: str):
+        if self.semantic_embedder is None:
+            raise RuntimeError("semantic embedder unavailable")
+        vecs = self.semantic_embedder.embed([text], batch_size=1, progress_callback=None, progress_every_s=0.0, cancel_event=None)
+        try:
+            return vecs[0]
+        except Exception:
+            return vecs
+
+    def _rag_search(self, query: str, top_k: int):
+        ix = self._rag_indexer()
+        if ix is None:
+            return []
+        try:
+            return ix.search(query, embed_query=self._rag_embed_query, top_k=top_k)
+        except Exception:
+            return []
+
+    def _get_rag_session(self):
+        ix = self._rag_indexer()
+        if ix is None:
+            return None
+        slug = self._rag_library_slug()
+        if not slug:
+            return None
+        if not self._rag_index_ready():
+            return None
+        try:
+            if self._rag_session is None or self._rag_session_slug != slug:
+                self._rag_session = ix.create_session(embed_query=self._rag_embed_query)
+                self._rag_session_slug = slug
+        except Exception:
+            self._rag_session = None
+            self._rag_session_slug = ""
+        return self._rag_session
+
+    def _rag_search_cached(self, query: str, top_k: int):
+        sess = self._get_rag_session()
+        if sess is None:
+            return self._rag_search(query, top_k=top_k)
+        try:
+            with self._rag_session_lock:
+                return sess.search(query, top_k=top_k)
+        except Exception:
+            return self._rag_search(query, top_k=top_k)
+
+    def _resolve_llm_server_path(self) -> str:
+        env = os.environ.get("AIWORDDETECTOR_LLAMA_SERVER_PATH", "").strip()
+        if env and os.path.exists(env):
+            return env
+        saved = (self.settings.get("llm_server_path", "") or "").strip()
+        if saved and os.path.exists(saved):
+            return saved
+        default_path = os.path.join(get_app_dir(), "models", "llm", "llama-server.exe")
+        if os.path.exists(default_path):
+            return default_path
+        return saved or env or default_path
+
+    def _resolve_llm_model_path(self) -> str:
+        env = os.environ.get("AIWORDDETECTOR_LLM_MODEL_PATH", "").strip()
+        if env and os.path.exists(env):
+            return env
+        saved = (self.settings.get("llm_model_path", "") or "").strip()
+        if saved and os.path.exists(saved):
+            return saved
+        default_path = os.path.join(get_app_dir(), "models", "llm", "qwen2.5-3b-instruct-q4_k_m.gguf")
+        if os.path.exists(default_path):
+            return default_path
+        return saved or env or default_path
+
+    def _get_llm_proc(self):
+        if LlamaServerProcess is None or LlamaServerConfig is None:
+            return None
+        server_path = self._resolve_llm_server_path()
+        model_path = self._resolve_llm_model_path()
+        try:
+            ctx = int(self.settings.get("llm_ctx_size", 2048) or 2048)
+        except Exception:
+            ctx = 2048
+        try:
+            threads = int(self.settings.get("llm_threads", 4) or 4)
+        except Exception:
+            threads = 4
+        try:
+            ngl = int(self.settings.get("llm_ngl", 0) or 0)
+        except Exception:
+            ngl = 0
+        try:
+            sleep_idle = int(self.settings.get("llm_sleep_idle_seconds", 300) or 300)
+        except Exception:
+            sleep_idle = 300
+
+        cfg = LlamaServerConfig(
+            server_path=server_path,
+            model_path=model_path,
+            ctx_size=max(512, min(ctx, 8192)),
+            threads=max(1, min(threads, 64)),
+            n_gpu_layers=max(0, min(ngl, 999999)),
+            sleep_idle_seconds=max(0, min(sleep_idle, 24 * 3600)),
+        )
+
+        proc = getattr(self, "_llama_server_proc", None)
+        if proc is None or getattr(proc, "cfg", None) is None:
+            log_path = os.path.join(get_settings_dir(), "llm", "llama_server.log")
+            proc = LlamaServerProcess(cfg, log_path=log_path)
+            self._llama_server_proc = proc
+            return proc
+
+        try:
+            same = (
+                getattr(proc.cfg, "server_path", "") == cfg.server_path
+                and getattr(proc.cfg, "model_path", "") == cfg.model_path
+                and int(getattr(proc.cfg, "ctx_size", 0) or 0) == int(cfg.ctx_size)
+                and int(getattr(proc.cfg, "threads", 0) or 0) == int(cfg.threads)
+                and int(getattr(proc.cfg, "n_gpu_layers", 0) or 0) == int(cfg.n_gpu_layers)
+            )
+        except Exception:
+            same = False
+
+        if not same:
+            try:
+                proc.stop()
+            except Exception:
+                pass
+            log_path = os.path.join(get_settings_dir(), "llm", "llama_server.log")
+            proc = LlamaServerProcess(cfg, log_path=log_path)
+            self._llama_server_proc = proc
+        else:
+            try:
+                proc.cfg = cfg
+            except Exception:
+                pass
+        return proc
+
+    def _stop_llm_proc(self):
+        proc = getattr(self, "_llama_server_proc", None)
+        if proc is None:
+            return
+        try:
+            proc.stop()
+        except Exception:
+            pass
+        self._llama_server_proc = None
+        try:
+            self._update_llm_badge()
+        except Exception:
+            pass
+
+    def _update_llm_badge(self):
+        badge = self._widgets.get("llm_badge")
+        tip = self._widgets.get("tt_llm_badge")
+        if badge is None or not getattr(badge, "winfo_exists", lambda: 0)():
+            return
+
+        if LlamaServerProcess is None or LlamaServerConfig is None:
+            badge.config(text=t("llm.badge.unavailable"), fg=Theme.TEXT_MUTED)
+            if tip is not None:
+                tip.text = t("llm.tip.unavailable")
+            return
+
+        try:
+            server_path = self._resolve_llm_server_path()
+        except Exception:
+            server_path = ""
+        try:
+            model_path = self._resolve_llm_model_path()
+        except Exception:
+            model_path = ""
+
+        server_ok = bool(server_path) and os.path.exists(server_path)
+        model_ok = bool(model_path) and os.path.exists(model_path)
+
+        if not server_ok or not model_ok:
+            badge.config(text=t("llm.badge.missing"), fg=Theme.WARNING)
+            if tip is not None:
+                tip.text = t("llm.tip.missing", server=server_path or "-", model=model_path or "-")
+            return
+
+        running = False
+        proc = getattr(self, "_llama_server_proc", None)
+        try:
+            running = proc is not None and proc.is_running() and proc.health(timeout_s=0.6)
+        except Exception:
+            running = False
+
+        if running:
+            badge.config(text=t("llm.badge.running"), fg=Theme.SUCCESS)
+        else:
+            badge.config(text=t("llm.badge.ready"), fg=Theme.TEXT_PRIMARY)
+
+        if tip is not None:
+            tip.text = t(
+                "llm.tip.ready",
+                server=os.path.basename(server_path) if server_path else "-",
+                model=os.path.basename(model_path) if model_path else "-",
+            )
+
+    def open_llm_manager_window(self):
+        if self._busy:
+            messagebox.showwarning(t("msg.warning"), t("progress.busy_message"))
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(t("llm.window_title"))
+        win.geometry("860x520")
+        win.configure(bg=Theme.BG_PRIMARY)
+
+        header = tk.Frame(win, bg=Theme.BG_SECONDARY)
+        header.pack(fill=tk.X, padx=16, pady=(16, 10))
+
+        tk.Label(
+            header,
+            text=t("llm.window_title"),
+            font=(FONT_UI, 13, "bold"),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_PRIMARY,
+        ).pack(side=tk.LEFT)
+
+        status_lbl = tk.Label(
+            header,
+            text="",
+            font=(FONT_UI, 10),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_MUTED,
+        )
+        status_lbl.pack(side=tk.RIGHT, padx=(12, 0))
+
+        btn_close = ModernButton(header, t("llm.btn.close"), command=win.destroy, width=84, height=32, font_size=10)
+        btn_close.pack(side=tk.RIGHT)
+
+        body = tk.Frame(win, bg=Theme.BG_PRIMARY)
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+
+        # ========== Paths ==========
+        paths = tk.Frame(body, bg=Theme.BG_SECONDARY)
+        paths.pack(fill=tk.X, pady=(0, 12))
+
+        tk.Label(paths, text=t("llm.section.paths"), font=(FONT_UI, 11, "bold"), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(12, 8))
+
+        server_var = tk.StringVar(value=self._resolve_llm_server_path())
+        model_var = tk.StringVar(value=self._resolve_llm_model_path())
+
+        def _row(parent, label_text: str, var: tk.StringVar, browse_cb):
+            row = tk.Frame(parent, bg=Theme.BG_SECONDARY)
+            row.pack(fill=tk.X, padx=16, pady=6)
+            tk.Label(row, text=label_text, font=(FONT_UI, 10), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_MUTED, width=14, anchor="w").pack(side=tk.LEFT)
+            ent = tk.Entry(row, textvariable=var, font=(FONT_UI, 10), bg=Theme.BG_INPUT, fg=Theme.TEXT_PRIMARY, relief=tk.FLAT)
+            ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8), ipady=6)
+            try:
+                ent.configure(state="readonly")
+            except Exception:
+                pass
+            ModernButton(row, t("llm.btn.browse"), command=browse_cb, width=84, height=32, font_size=10).pack(side=tk.LEFT)
+
+        def _pick_server():
+            cur = (server_var.get() or "").strip()
+            path = filedialog.askopenfilename(
+                title=t("polish.pick_server_title"),
+                initialfile=os.path.basename(cur) if cur else "",
+                filetypes=[("llama-server", "llama-server.exe"), ("EXE", "*.exe"), ("All", "*.*")],
+            )
+            if path:
+                server_var.set(path)
+                try:
+                    self.settings.set("llm_server_path", path)
+                except Exception:
+                    pass
+                self._stop_llm_proc()
+                self._update_llm_badge()
+
+        def _pick_model():
+            cur = (model_var.get() or "").strip()
+            path = filedialog.askopenfilename(
+                title=t("polish.pick_model_title"),
+                initialfile=os.path.basename(cur) if cur else "",
+                filetypes=[("GGUF", "*.gguf"), ("All", "*.*")],
+            )
+            if path:
+                model_var.set(path)
+                try:
+                    self.settings.set("llm_model_path", path)
+                except Exception:
+                    pass
+                self._stop_llm_proc()
+                self._update_llm_badge()
+
+        _row(paths, t("llm.path.server"), server_var, _pick_server)
+        _row(paths, t("llm.path.model"), model_var, _pick_model)
+
+        # ========== Runtime knobs ==========
+        runtime = tk.Frame(body, bg=Theme.BG_SECONDARY)
+        runtime.pack(fill=tk.BOTH, expand=True)
+
+        top = tk.Frame(runtime, bg=Theme.BG_SECONDARY)
+        top.pack(fill=tk.X, padx=16, pady=(12, 8))
+        tk.Label(top, text=t("llm.section.runtime"), font=(FONT_UI, 11, "bold"), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_PRIMARY).pack(side=tk.LEFT)
+        tk.Label(top, text=t("llm.hint.8gb"), font=(FONT_UI, 10), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_MUTED).pack(side=tk.LEFT, padx=12)
+
+        grid = tk.Frame(runtime, bg=Theme.BG_SECONDARY)
+        grid.pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        def _get_int(key: str, default: int) -> int:
+            try:
+                return int(self.settings.get(key, default) or default)
+            except Exception:
+                return int(default)
+
+        def _get_float(key: str, default: float) -> float:
+            try:
+                return float(self.settings.get(key, default) or default)
+            except Exception:
+                return float(default)
+
+        ctx_var = tk.StringVar(value=str(_get_int("llm_ctx_size", 2048)))
+        thr_var = tk.StringVar(value=str(_get_int("llm_threads", 4)))
+        ngl_var = tk.StringVar(value=str(_get_int("llm_ngl", 0)))
+        idle_var = tk.StringVar(value=str(_get_int("llm_sleep_idle_seconds", 300)))
+        max_tok_var = tk.StringVar(value=str(_get_int("llm_max_tokens", 900)))
+        retry_var = tk.StringVar(value=str(_get_int("llm_json_retries", 2)))
+        temp_var = tk.StringVar(value=str(_get_float("llm_temperature", 0.0)))
+
+        def _spin(parent, label_text: str, var: tk.StringVar, from_: int, to: int, width: int = 7):
+            row = tk.Frame(parent, bg=Theme.BG_SECONDARY)
+            row.pack(side=tk.LEFT, padx=(0, 14), pady=6)
+            tk.Label(row, text=label_text, font=(FONT_UI, 10), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_MUTED).pack(side=tk.LEFT, padx=(0, 6))
+            sp = tk.Spinbox(row, from_=from_, to=to, textvariable=var, width=width, font=(FONT_UI, 10), bg=Theme.BG_INPUT, fg=Theme.TEXT_PRIMARY, relief=tk.FLAT)
+            sp.pack(side=tk.LEFT)
+            return sp
+
+        def _entry(parent, label_text: str, var: tk.StringVar, width: int = 6):
+            row = tk.Frame(parent, bg=Theme.BG_SECONDARY)
+            row.pack(side=tk.LEFT, padx=(0, 14), pady=6)
+            tk.Label(row, text=label_text, font=(FONT_UI, 10), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_MUTED).pack(side=tk.LEFT, padx=(0, 6))
+            ent = tk.Entry(row, textvariable=var, width=width, font=(FONT_UI, 10), bg=Theme.BG_INPUT, fg=Theme.TEXT_PRIMARY, relief=tk.FLAT)
+            ent.pack(side=tk.LEFT, ipady=2)
+            return ent
+
+        row1 = tk.Frame(grid, bg=Theme.BG_SECONDARY)
+        row1.pack(fill=tk.X)
+        _spin(row1, t("llm.knob.ctx"), ctx_var, 512, 8192)
+        _spin(row1, t("llm.knob.threads"), thr_var, 1, 64)
+        _spin(row1, t("llm.knob.ngl"), ngl_var, 0, 999)
+        _spin(row1, t("llm.knob.idle"), idle_var, 0, 36000, width=8)
+
+        row2 = tk.Frame(grid, bg=Theme.BG_SECONDARY)
+        row2.pack(fill=tk.X)
+        _spin(row2, t("llm.knob.max_tokens"), max_tok_var, 128, 1600, width=8)
+        _spin(row2, t("llm.knob.retries"), retry_var, 0, 3, width=4)
+        _entry(row2, t("llm.knob.temp"), temp_var, width=6)
+
+        actions = tk.Frame(runtime, bg=Theme.BG_SECONDARY)
+        actions.pack(fill=tk.X, padx=16, pady=(8, 12))
+
+        def _apply_knobs():
+            try:
+                self.settings.set("llm_ctx_size", int(ctx_var.get() or 2048))
+            except Exception:
+                pass
+            try:
+                self.settings.set("llm_threads", int(thr_var.get() or 4))
+            except Exception:
+                pass
+            try:
+                self.settings.set("llm_ngl", int(ngl_var.get() or 0))
+            except Exception:
+                pass
+            try:
+                self.settings.set("llm_sleep_idle_seconds", int(idle_var.get() or 300))
+            except Exception:
+                pass
+            try:
+                self.settings.set("llm_max_tokens", int(max_tok_var.get() or 900))
+            except Exception:
+                pass
+            try:
+                self.settings.set("llm_json_retries", int(retry_var.get() or 2))
+            except Exception:
+                pass
+            try:
+                self.settings.set("llm_temperature", float(temp_var.get() or 0.0))
+            except Exception:
+                pass
+            self._stop_llm_proc()
+            self._update_llm_badge()
+
+        def _preset_8gb():
+            ctx_var.set("2048")
+            thr_var.set(str(min(4, max(1, int(os.cpu_count() or 4)))))
+            ngl_var.set("0")
+            idle_var.set("300")
+            max_tok_var.set("900")
+            retry_var.set("2")
+            temp_var.set("0.0")
+
+        def _open_log():
+            log_path = os.path.join(get_settings_dir(), "llm", "llama_server.log")
+            if not log_path or not os.path.exists(log_path):
+                messagebox.showinfo(t("msg.info"), t("llm.log_missing"))
+                return
+            try:
+                os.startfile(log_path)
+            except Exception as e:
+                messagebox.showerror(t("msg.error"), str(e))
+
+        def _stop_server():
+            self._stop_llm_proc()
+            self._update_llm_badge()
+            status_lbl.config(text=t("llm.status.stopped"), fg=Theme.TEXT_MUTED)
+
+        def _test_llm_async():
+            _apply_knobs()
+            status_lbl.config(text=t("llm.status.testing"), fg=Theme.WARNING)
+
+            def worker():
+                proc = self._get_llm_proc()
+                if proc is None:
+                    win.after(0, lambda: status_lbl.config(text=t("llm.status.unavailable"), fg=Theme.DANGER))
+                    return
+                try:
+                    ok = proc.ensure_started(timeout_s=45.0)
+                except Exception:
+                    ok = False
+                if not ok:
+                    win.after(0, lambda: status_lbl.config(text=t("llm.status.start_failed"), fg=Theme.DANGER))
+                    return
+
+                try:
+                    status, resp = proc.chat(
+                        messages=[
+                            {"role": "system", "content": "Return STRICT JSON only."},
+                            {"role": "user", "content": "{\"ok\": true}"},
+                        ],
+                        temperature=0.0,
+                        max_tokens=32,
+                        timeout_s=30.0,
+                    )
+                    ok_req = int(status or 0) == 200 and isinstance(resp, dict) and bool(resp.get("choices", []))
+                except Exception:
+                    ok_req = False
+
+                def ui_done():
+                    if ok_req:
+                        status_lbl.config(text=t("llm.status.ok"), fg=Theme.SUCCESS)
+                    else:
+                        status_lbl.config(text=t("llm.status.request_failed"), fg=Theme.DANGER)
+                    try:
+                        self._update_llm_badge()
+                    except Exception:
+                        pass
+
+                win.after(0, ui_done)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ModernButton(actions, t("llm.btn.preset_8gb"), command=_preset_8gb, width=130, height=32, font_size=10).pack(side=tk.LEFT, padx=(0, 8))
+        ModernButton(actions, t("llm.btn.apply"), command=_apply_knobs, width=84, height=32, font_size=10).pack(side=tk.LEFT, padx=(0, 8))
+        ModernButton(actions, t("llm.btn.test"), command=_test_llm_async, width=84, height=32, font_size=10, accent=True).pack(side=tk.LEFT, padx=(0, 8))
+        ModernButton(actions, t("llm.btn.stop"), command=_stop_server, width=84, height=32, font_size=10).pack(side=tk.LEFT, padx=(0, 8))
+        ModernButton(actions, t("llm.btn.open_log"), command=_open_log, width=110, height=32, font_size=10).pack(side=tk.RIGHT)
+
+        # Initial status
+        self._update_llm_badge()
+        try:
+            status_lbl.config(text=(self._widgets.get("llm_badge").cget("text") or "").strip(), fg=Theme.TEXT_MUTED)
+        except Exception:
+            pass
+
+    def open_polish_window(self):
+        if self._busy:
+            messagebox.showwarning(t("msg.warning"), t("progress.busy_message"))
+            return
+        if not self.current_library:
+            messagebox.showwarning(t("msg.warning"), t("msg.load_vocab_first"))
+            return
+        if not self._require_semantic_model():
+            return
+
+        selected, start_idx, end_idx, has_sel = self._get_selected_input_range()
+        if not has_sel:
+            messagebox.showwarning(t("msg.warning"), t("msg.select_text_first"))
+            return
+        if not selected or len(selected) < 12:
+            messagebox.showwarning(t("msg.warning"), t("msg.select_text_first"))
+            return
+
+        if not self._rag_index_ready():
+            messagebox.showwarning(t("msg.warning"), t("msg.rag_missing"))
+            return
+
+        try:
+            top_k = int(self.settings.get("rag_top_k", getattr(self, "rag_top_k", 8)) or 8)
+        except Exception:
+            top_k = 8
+        top_k = max(2, min(int(top_k), 12))
+
+        results = self._rag_search_cached(selected, top_k=top_k)
+        self._last_rag_results = results
+        try:
+            max_ex_chars = int(self.settings.get("llm_exemplar_max_chars", 420) or 420)
+        except Exception:
+            max_ex_chars = 420
+        max_ex_chars = max(180, min(int(max_ex_chars), 1500))
+
+        win = tk.Toplevel(self.root)
+        win.title(t("polish.window_title"))
+        win.geometry("1100x700")
+        win.configure(bg=Theme.BG_PRIMARY)
+
+        header = tk.Frame(win, bg=Theme.BG_SECONDARY)
+        header.pack(fill=tk.X, padx=16, pady=(16, 10))
+        tk.Label(
+            header,
+            text=t("polish.window_title"),
+            font=(FONT_UI, 13, "bold"),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_PRIMARY,
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            header,
+            text=t("polish.window_hint", k=top_k),
+            font=(FONT_UI, 10),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_MUTED,
+        ).pack(side=tk.LEFT, padx=12)
+
+        btn_close = ModernButton(header, t("polish.btn.close"), command=win.destroy, width=84, height=32, font_size=10)
+        btn_close.pack(side=tk.RIGHT)
+
+        # Selected text
+        sel_panel = tk.Frame(win, bg=Theme.BG_SECONDARY)
+        sel_panel.pack(fill=tk.X, padx=16, pady=(0, 10))
+        tk.Label(
+            sel_panel,
+            text=t("polish.selected_title"),
+            font=(FONT_UI, 11, "bold"),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_PRIMARY,
+        ).pack(anchor="w", padx=16, pady=(12, 6))
+
+        sel_box = tk.Text(
+            sel_panel,
+            height=6,
+            wrap=tk.CHAR,
+            font=(FONT_MONO, max(11, int(self.font_size or 13))),
+            bg=Theme.BG_INPUT,
+            fg=Theme.TEXT_PRIMARY,
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=12,
+            pady=10,
+        )
+        sel_box.pack(fill=tk.X, padx=16, pady=(0, 16))
+        sel_box.insert("1.0", selected.strip())
+        self._bind_readonly_text(sel_box)
+
+        # Exemplars + controlled rewrite (split, resizable)
+        ex_panel = tk.Frame(win, bg=Theme.BG_SECONDARY)
+        ex_panel.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+
+        io_split = tk.PanedWindow(ex_panel, orient=tk.VERTICAL, bg=Theme.BG_SECONDARY, sashwidth=8, relief=tk.FLAT, borderwidth=0)
+        io_split.pack(fill=tk.BOTH, expand=True)
+
+        ex_section = tk.Frame(io_split, bg=Theme.BG_SECONDARY)
+        out_section = tk.Frame(io_split, bg=Theme.BG_SECONDARY)
+        io_split.add(ex_section, minsize=220)
+        io_split.add(out_section, minsize=210)
+
+        def _init_io_sash():
+            try:
+                h = io_split.winfo_height()
+                if h and h > 0:
+                    # Default: give exemplars a bit more space, but keep output visible.
+                    io_split.sash_place(0, 0, int(h * 0.58))
+            except Exception:
+                pass
+
+        win.after(120, _init_io_sash)
+
+        ex_top = tk.Frame(ex_section, bg=Theme.BG_SECONDARY)
+        ex_top.pack(fill=tk.X, padx=16, pady=(12, 8))
+        tk.Label(
+            ex_top,
+            text=t("polish.exemplars_title"),
+            font=(FONT_UI, 11, "bold"),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_PRIMARY,
+        ).pack(side=tk.LEFT)
+
+        ex_container = tk.Frame(ex_section, bg=Theme.BG_INPUT)
+        ex_container.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        ex_text = tk.Text(
+            ex_container,
+            wrap=tk.CHAR,
+            font=(FONT_UI, max(11, int(self.font_size or 13))),
+            bg=Theme.BG_INPUT,
+            fg=Theme.TEXT_PRIMARY,
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=12,
+            pady=12,
+        )
+        ex_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ex_scroll = tk.Scrollbar(
+            ex_container,
+            orient="vertical",
+            command=ex_text.yview,
+            bg=Theme.BG_TERTIARY,
+            troughcolor=Theme.BG_INPUT,
+        )
+        ex_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        ex_text.configure(yscrollcommand=ex_scroll.set)
+        self._bind_readonly_text(ex_text)
+
+        def _copy_exemplars():
+            try:
+                self._copy_text(ex_text.get("1.0", tk.END).rstrip())
+            except Exception:
+                pass
+
+        btn_copy = ModernButton(ex_top, t("polish.btn.copy_exemplars"), command=_copy_exemplars, width=130, height=32, font_size=10)
+        btn_copy.pack(side=tk.RIGHT)
+
+        if not results:
+            ex_text.insert("1.0", t("polish.no_results"))
+        else:
+            parts = []
+            for i, (score, node) in enumerate(results, start=1):
+                cid = f"C{i}"
+                try:
+                    pdf = getattr(node, "pdf", "") or ""
+                    page = int(getattr(node, "page", 0) or 0)
+                    txt = getattr(node, "text", "") or ""
+                except Exception:
+                    pdf, page, txt = "", 0, ""
+                txt = (txt or "").strip()
+                if max_ex_chars and len(txt) > max_ex_chars:
+                    txt = txt[:max_ex_chars].rstrip() + "…"
+                parts.append(f"{cid}  [{pdf}#p{page}]  {float(score or 0.0):.3f}\n{txt}\n")
+            ex_text.insert("1.0", "\n".join(parts).strip())
+
+        # ========== LLM rewrite (controlled) ==========
+        variants_by_level = {}  # "light"/"medium" -> parsed variant
+        diagnosis_items = []    # list of parsed diagnosis items (white-box)
+        last_report = {"text": ""}  # store last rendered report for copy
+
+        out_sep = tk.Frame(out_section, bg=Theme.BG_TERTIARY, height=1)
+        out_sep.pack(fill=tk.X, padx=16, pady=(12, 10))
+
+        out_top = tk.Frame(out_section, bg=Theme.BG_SECONDARY)
+        out_top.pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        tk.Label(
+            out_top,
+            text=t("polish.output_title"),
+            font=(FONT_UI, 11, "bold"),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_PRIMARY,
+        ).pack(side=tk.LEFT)
+
+        out_actions = tk.Frame(out_top, bg=Theme.BG_SECONDARY)
+        out_actions.pack(side=tk.RIGHT)
+
+        out_container = tk.Frame(out_section, bg=Theme.BG_INPUT)
+        out_container.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+
+        out_text = tk.Text(
+            out_container,
+            height=10,
+            wrap=tk.CHAR,
+            font=(FONT_UI, max(11, int(self.font_size or 13))),
+            bg=Theme.BG_INPUT,
+            fg=Theme.TEXT_PRIMARY,
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=12,
+            pady=12,
+        )
+        out_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        out_scroll = tk.Scrollbar(out_container, orient="vertical", command=out_text.yview, bg=Theme.BG_TERTIARY, troughcolor=Theme.BG_INPUT)
+        out_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        out_text.configure(yscrollcommand=out_scroll.set)
+        self._bind_readonly_text(out_text)
+        out_text.insert("1.0", t("polish.output_placeholder"))
+
+        def _set_out(text: str):
+            try:
+                out_text.config(state=tk.NORMAL)
+                out_text.delete("1.0", tk.END)
+                out_text.insert("1.0", text or "")
+                out_text.config(state=tk.NORMAL)  # selection/copy still allowed
+            except Exception:
+                pass
+
+        def _apply_variant(level: str):
+            v = variants_by_level.get(level)
+            if v is None:
+                lvl_disp = level
+                try:
+                    if level == "light":
+                        lvl_disp = t("polish.level.light")
+                    elif level == "medium":
+                        lvl_disp = t("polish.level.medium")
+                except Exception:
+                    lvl_disp = level
+                messagebox.showwarning(t("msg.warning"), t("polish.no_variant", level=lvl_disp))
+                return
+            try:
+                self.input_text.edit_separator()
+            except Exception:
+                pass
+            try:
+                self.input_text.delete(start_idx, end_idx)
+                self.input_text.insert(start_idx, (getattr(v, "rewrite", "") or "").strip())
+                try:
+                    self.input_text.tag_remove(tk.SEL, "1.0", tk.END)
+                    self.input_text.tag_add(tk.SEL, start_idx, f"{start_idx}+{len((getattr(v, 'rewrite', '') or '').strip())}c")
+                except Exception:
+                    pass
+                self.input_text.focus_set()
+                win.destroy()
+            except Exception as e:
+                messagebox.showerror(t("msg.error"), str(e))
+
+        def _copy_report():
+            text = (last_report.get("text", "") if isinstance(last_report, dict) else "") or ""
+            if not text.strip():
+                try:
+                    text = out_text.get("1.0", tk.END).rstrip()
+                except Exception:
+                    text = ""
+            if text:
+                try:
+                    self._copy_text(text)
+                except Exception:
+                    pass
+
+        btn_apply_light = ModernButton(out_actions, t("polish.btn.apply_light"), command=lambda: _apply_variant("light"), width=110, height=32, font_size=10)
+        btn_apply_medium = ModernButton(out_actions, t("polish.btn.apply_medium"), command=lambda: _apply_variant("medium"), width=120, height=32, font_size=10)
+        btn_generate = ModernButton(out_actions, t("polish.btn.generate"), command=lambda: None, width=110, height=32, font_size=10, accent=True)
+        btn_settings = ModernButton(out_actions, t("polish.btn.settings"), command=lambda: None, width=110, height=32, font_size=10)
+        btn_copy_report = ModernButton(out_actions, t("polish.btn.copy_report"), command=_copy_report, width=110, height=32, font_size=10)
+
+        # pack order: rightmost first
+        btn_apply_medium.pack(side=tk.RIGHT, padx=(8, 0))
+        btn_apply_light.pack(side=tk.RIGHT, padx=(8, 0))
+        btn_generate.pack(side=tk.RIGHT, padx=(8, 0))
+        btn_copy_report.pack(side=tk.RIGHT, padx=(8, 0))
+        btn_settings.pack(side=tk.RIGHT)
+
+        try:
+            btn_apply_light.set_enabled(False)
+            btn_apply_medium.set_enabled(False)
+            btn_generate.set_enabled(bool(results))
+        except Exception:
+            pass
+
+        def _open_llm_settings():
+            # Choose llama-server.exe
+            try:
+                cur_srv = self._resolve_llm_server_path()
+            except Exception:
+                cur_srv = ""
+            srv = filedialog.askopenfilename(
+                title=t("polish.pick_server_title"),
+                initialfile=os.path.basename(cur_srv) if cur_srv else "",
+                filetypes=[("llama-server", "llama-server.exe"), ("EXE", "*.exe"), ("All", "*.*")],
+            )
+            if srv:
+                try:
+                    self.settings.set("llm_server_path", srv)
+                    self._stop_llm_proc()
+                except Exception:
+                    pass
+
+            # Choose GGUF model
+            try:
+                cur_model = self._resolve_llm_model_path()
+            except Exception:
+                cur_model = ""
+            model = filedialog.askopenfilename(
+                title=t("polish.pick_model_title"),
+                initialfile=os.path.basename(cur_model) if cur_model else "",
+                filetypes=[("GGUF", "*.gguf"), ("All", "*.*")],
+            )
+            if model:
+                try:
+                    self.settings.set("llm_model_path", model)
+                    self._stop_llm_proc()
+                except Exception:
+                    pass
+
+        btn_settings.command = _open_llm_settings
+
+        def _generate_async():
+            if build_polish_prompt is None or extract_json is None or validate_polish_json is None or LlamaServerProcess is None:
+                messagebox.showerror(t("msg.error"), t("polish.llm_unavailable"))
+                return
+
+            proc = self._get_llm_proc()
+            if proc is None:
+                messagebox.showerror(t("msg.error"), t("polish.llm_unavailable"))
+                return
+
+            server_path = getattr(getattr(proc, "cfg", None), "server_path", "") or ""
+            model_path = getattr(getattr(proc, "cfg", None), "model_path", "") or ""
+            if not server_path or not os.path.exists(server_path) or not model_path or not os.path.exists(model_path):
+                messagebox.showwarning(t("msg.warning"), t("polish.llm_not_configured"))
+                return
+
+            try:
+                btn_generate.set_enabled(False)
+                btn_apply_light.set_enabled(False)
+                btn_apply_medium.set_enabled(False)
+            except Exception:
+                pass
+
+            _set_out(t("polish.generating"))
+
+            def worker():
+                try:
+                    ok = proc.ensure_started(timeout_s=35.0)
+                except Exception:
+                    ok = False
+                if not ok:
+                    win.after(0, lambda: _set_out(t("polish.llm_start_failed")))
+                    win.after(0, lambda: btn_generate.set_enabled(True))
+                    return
+
+                try:
+                    win.after(0, self._update_llm_badge)
+                except Exception:
+                    pass
+
+                # Build citations
+                c_list = []
+                allowed_quotes = {}
+                max_use = max(1, min(int(top_k), len(results)))
+                for i, (_score, node) in enumerate(results[:max_use]):
+                    cid = f"C{i+1}"
+                    try:
+                        pdf = getattr(node, "pdf", "") or ""
+                        page = int(getattr(node, "page", 0) or 0)
+                        txt = (getattr(node, "text", "") or "").strip()
+                    except Exception:
+                        pdf, page, txt = "", 0, ""
+                    if max_ex_chars and len(txt) > max_ex_chars:
+                        txt = txt[:max_ex_chars].rstrip() + "…"
+                    excerpt = f"[{pdf}#p{page}] {txt}"
+                    c_list.append((cid, excerpt))
+                    allowed_quotes[cid] = excerpt
+
+                lang = LanguageDetector.detect(selected)
+                prompt = build_polish_prompt(selected_text=selected, citations=c_list, language=lang)
+
+                messages = [
+                    {"role": "system", "content": "Return STRICT JSON only."},
+                    {"role": "user", "content": prompt},
+                ]
+
+                try:
+                    temp = float(self.settings.get("llm_temperature", 0.0) or 0.0)
+                except Exception:
+                    temp = 0.0
+                try:
+                    max_toks_cfg = int(self.settings.get("llm_max_tokens", 900) or 900)
+                except Exception:
+                    max_toks_cfg = 900
+
+                # Adaptive output budget: prevent truncated JSON when users select long paragraphs.
+                try:
+                    sel_len = len((selected or "").strip())
+                except Exception:
+                    sel_len = 0
+                min_needed = int(450 + min(1200, max(0, sel_len)) * 0.55)
+                min_needed = max(520, min(min_needed, 1400))
+                max_toks = max(int(max_toks_cfg or 0), int(min_needed))
+                max_toks = max(256, min(int(max_toks), 1600))
+
+                try:
+                    retries = int(self.settings.get("llm_json_retries", 2) or 2)
+                except Exception:
+                    retries = 2
+                retries = max(0, min(int(retries), 3))
+                attempts = 1 + retries
+
+                last_err = ""
+                parsed = None
+
+                for attempt in range(1, attempts + 1):
+                    if attempt > 1:
+                        win.after(0, lambda a=attempt, n=attempts: _set_out(t("polish.generating") + f" ({a}/{n})"))
+                        # Ask the model to repair output according to validation errors.
+                        repair_note = (last_err or "invalid JSON").strip()
+                        repair_prompt = "\n\n".join([
+                            "Your previous output was invalid.",
+                            f"VALIDATION_ERROR: {repair_note}",
+                            "Fix it and output STRICT JSON ONLY matching OUTPUT_SCHEMA.",
+                            "Do not add any extra keys. Do not include markdown. Ensure the JSON is complete and valid.",
+                            "",
+                            prompt,
+                        ]).strip()
+                        messages = [
+                            {"role": "system", "content": "Return STRICT JSON only."},
+                            {"role": "user", "content": repair_prompt},
+                        ]
+
+                    status, resp = proc.chat(messages=messages, temperature=temp, max_tokens=max_toks, timeout_s=180.0)
+                    if int(status or 0) != 200 or not isinstance(resp, dict):
+                        last_err = t("polish.llm_request_failed", code=status)
+                        if attempt >= attempts:
+                            win.after(0, lambda: _set_out(last_err))
+                            win.after(0, lambda: btn_generate.set_enabled(True))
+                            return
+                        continue
+
+                    content = ""
+                    try:
+                        choices = resp.get("choices", [])
+                        if isinstance(choices, list) and choices:
+                            msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+                            if isinstance(msg, dict):
+                                content = (msg.get("content", "") or "").strip()
+                    except Exception:
+                        content = ""
+
+                    data = extract_json(content) if content else None
+                    if not isinstance(data, dict):
+                        last_err = t("polish.bad_json")
+                        if attempt >= attempts:
+                            win.after(0, lambda: _set_out(last_err))
+                            win.after(0, lambda: btn_generate.set_enabled(True))
+                            return
+                        continue
+
+                    try:
+                        parsed = validate_polish_json(
+                            data,
+                            allowed_citation_ids=[cid for cid, _ in c_list],
+                            allowed_quotes=allowed_quotes,
+                            selected_text=selected,
+                        )
+                        break
+                    except PolishValidationError as e:
+                        last_err = t("polish.bad_json") + f"\n\n{str(e).strip()}"
+                        parsed = None
+                        if attempt >= attempts:
+                            win.after(0, lambda err=last_err: _set_out(err))
+                            win.after(0, lambda: btn_generate.set_enabled(True))
+                            return
+                        continue
+                    except Exception as e:
+                        last_err = str(e).strip()
+                        parsed = None
+                        if attempt >= attempts:
+                            win.after(0, lambda err=last_err: _set_out(err))
+                            win.after(0, lambda: btn_generate.set_enabled(True))
+                            return
+                        continue
+
+                try:
+                    for v in getattr(parsed, "variants", []) or []:
+                        lvl = (getattr(v, "level", "") or "").strip().lower()
+                        if lvl:
+                            variants_by_level[lvl] = v
+                except Exception:
+                    pass
+                try:
+                    diagnosis_items[:] = list(getattr(parsed, "diagnosis", []) or [])
+                except Exception:
+                    diagnosis_items[:] = []
+
+                # Optional semantic guardrail: filter out variants that drift too far from the selected text.
+                sim_notes = []
+                variant_sims = {}
+                try:
+                    thr_light = float(self.settings.get("llm_min_similarity_light", 0.88) or 0.88)
+                except Exception:
+                    thr_light = 0.88
+                try:
+                    thr_med = float(self.settings.get("llm_min_similarity_medium", 0.82) or 0.82)
+                except Exception:
+                    thr_med = 0.82
+
+                try:
+                    if self.semantic_embedder is not None:
+                        for lvl in list(variants_by_level.keys()):
+                            v = variants_by_level.get(lvl)
+                            if v is None:
+                                continue
+                            thr = thr_light if lvl == "light" else (thr_med if lvl == "medium" else 0.0)
+                            if thr <= 0.0:
+                                continue
+                            rewrite_text = (getattr(v, "rewrite", "") or "").strip()
+                            if not rewrite_text:
+                                continue
+                            vecs = self.semantic_embedder.embed(
+                                [selected, rewrite_text],
+                                batch_size=2,
+                                progress_callback=None,
+                                progress_every_s=0.0,
+                                cancel_event=None,
+                            )
+                            sim = 0.0
+                            try:
+                                sim = float(vecs[0] @ vecs[1])
+                            except Exception:
+                                sim = 0.0
+                            variant_sims[lvl] = sim
+                            if sim < float(thr):
+                                lvl_disp = lvl
+                                try:
+                                    if lvl == "light":
+                                        lvl_disp = t("polish.level.light")
+                                    elif lvl == "medium":
+                                        lvl_disp = t("polish.level.medium")
+                                except Exception:
+                                    lvl_disp = lvl
+                                sim_notes.append(t("polish.guard_similarity_rejected", level=lvl_disp, score=sim, min=thr))
+                                variants_by_level.pop(lvl, None)
+                except Exception:
+                    pass
+
+                def render():
+                    lines = []
+                    v_light = variants_by_level.get("light")
+                    v_med = variants_by_level.get("medium")
+
+                    if diagnosis_items:
+                        lines.append(f"=== {t('polish.section.diagnosis')} ===")
+                        for j, it in enumerate(diagnosis_items[:8], start=1):
+                            try:
+                                title = (getattr(it, "title", "") or "").strip()
+                                problem = (getattr(it, "problem", "") or "").strip()
+                                suggestion = (getattr(it, "suggestion", "") or "").strip()
+                                evidence = list(getattr(it, "evidence", []) or [])
+                            except Exception:
+                                title, problem, suggestion, evidence = "", "", "", []
+
+                            if not title and not suggestion:
+                                continue
+                            lines.append(f"{j}. {title}".strip(". ").strip())
+                            if problem:
+                                lines.append(f"- {t('polish.diagnosis.problem')}: {problem}")
+                            if suggestion:
+                                lines.append(f"- {t('polish.diagnosis.suggestion')}: {suggestion}")
+                            if evidence:
+                                lines.append(f"- {t('polish.diagnosis.evidence')}:")
+                                for c in evidence[:3]:
+                                    try:
+                                        cid = (getattr(c, "id", "") or "").strip()
+                                        pdf = (getattr(c, "pdf", "") or "").strip()
+                                        page = int(getattr(c, "page", 0) or 0)
+                                        quote = (getattr(c, "quote", "") or "").strip()
+                                    except Exception:
+                                        cid, pdf, page, quote = "", "", 0, ""
+                                    head = f"[{cid}]" if cid else ""
+                                    if pdf and page > 0:
+                                        head = (head + " " if head else "") + f"[{pdf}#p{page}]"
+                                    elif pdf:
+                                        head = (head + " " if head else "") + f"[{pdf}]"
+                                    elif page > 0:
+                                        head = (head + " " if head else "") + f"[p{page}]"
+                                    if head:
+                                        lines.append(f"  - {head} {quote}".strip())
+                                    else:
+                                        lines.append(f"  - {quote}".strip())
+                            lines.append("")
+
+                    def fmt_variant(title: str, v, lvl: str) -> str:
+                        out = [f"=== {title} ===", (getattr(v, "rewrite", "") or "").strip()]
+                        sim = variant_sims.get(lvl, None)
+                        if sim is not None:
+                            out.append(f"{t('polish.section.similarity')}: {float(sim):.3f}")
+                        try:
+                            ch = list(getattr(v, "changes", []) or [])
+                        except Exception:
+                            ch = []
+                        ch = [str(x).strip() for x in ch if str(x).strip()]
+                        if ch:
+                            out.append("")
+                            out.append(t("polish.section.changes") + ":")
+                            for item in ch[:12]:
+                                out.append(f"- {item}")
+
+                        try:
+                            cits = list(getattr(v, "citations", []) or [])
+                        except Exception:
+                            cits = []
+                        if cits:
+                            out.append("")
+                            out.append(t("polish.section.citations") + ":")
+                            for c in cits[:5]:
+                                try:
+                                    cid = (getattr(c, "id", "") or "").strip()
+                                    pdf = (getattr(c, "pdf", "") or "").strip()
+                                    page = int(getattr(c, "page", 0) or 0)
+                                    quote = (getattr(c, "quote", "") or "").strip()
+                                except Exception:
+                                    cid, pdf, page, quote = "", "", 0, ""
+                                head = f"[{cid}]" if cid else ""
+                                if pdf and page > 0:
+                                    head = (head + " " if head else "") + f"[{pdf}#p{page}]"
+                                elif pdf:
+                                    head = (head + " " if head else "") + f"[{pdf}]"
+                                elif page > 0:
+                                    head = (head + " " if head else "") + f"[p{page}]"
+                                if head:
+                                    out.append(f"- {head} {quote}".strip())
+                                else:
+                                    out.append(f"- {quote}".strip())
+                        return "\n".join([x for x in out if x is not None]).strip()
+
+                    if v_light is not None:
+                        lines.append(fmt_variant(t("polish.level.light"), v_light, "light"))
+                    if v_med is not None:
+                        lines.append(fmt_variant(t("polish.level.medium"), v_med, "medium"))
+                    if not lines:
+                        lines.append(t("polish.no_results"))
+                    if sim_notes:
+                        lines.append("\n".join([str(x) for x in sim_notes if str(x).strip()]).strip())
+                    rendered = "\n\n".join([x for x in lines if str(x).strip()]).strip()
+                    report = []
+                    report.append(t("polish.selected_title") + ":\n" + (selected or "").strip())
+                    report.append(t("polish.exemplars_title") + ":\n" + (ex_text.get("1.0", tk.END).rstrip() if ex_text else ""))
+                    report.append(t("polish.output_title") + ":\n" + (rendered or ""))
+                    try:
+                        last_report["text"] = "\n\n".join([x for x in report if str(x).strip()]).strip()
+                    except Exception:
+                        pass
+                    _set_out(rendered)
+                    try:
+                        btn_apply_light.set_enabled(v_light is not None)
+                        btn_apply_medium.set_enabled(v_med is not None)
+                        btn_generate.set_enabled(True)
+                    except Exception:
+                        pass
+
+                win.after(0, render)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        btn_generate.command = _generate_async
+
+    def open_align_scan_window(self):
+        if self._busy:
+            messagebox.showwarning(t("msg.warning"), t("progress.busy_message"))
+            return
+        if not self.current_library:
+            messagebox.showwarning(t("msg.warning"), t("msg.load_vocab_first"))
+            return
+        if not self._require_semantic_model():
+            return
+        if not self._rag_index_ready():
+            messagebox.showwarning(t("msg.warning"), t("msg.rag_missing"))
+            return
+
+        raw_text = self.input_text.get("1.0", tk.END)
+        raw_text = (raw_text or "").rstrip("\n")
+        if not raw_text.strip():
+            messagebox.showwarning(t("msg.warning"), t("msg.enter_text"))
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(t("align_scan.window_title"))
+        win.geometry("1100x720")
+        win.configure(bg=Theme.BG_PRIMARY)
+
+        cancel_event = threading.Event()
+
+        def _on_close():
+            try:
+                cancel_event.set()
+            except Exception:
+                pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        try:
+            win.protocol("WM_DELETE_WINDOW", _on_close)
+        except Exception:
+            pass
+
+        header = tk.Frame(win, bg=Theme.BG_SECONDARY)
+        header.pack(fill=tk.X, padx=16, pady=(16, 10))
+
+        tk.Label(
+            header,
+            text=t("align_scan.window_title"),
+            font=(FONT_UI, 13, "bold"),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_PRIMARY,
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            header,
+            text=t("align_scan.hint"),
+            font=(FONT_UI, 10),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.TEXT_MUTED,
+        ).pack(side=tk.LEFT, padx=12)
+
+        status_lbl = tk.Label(
+            header,
+            text="",
+            font=(FONT_UI, 10),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.WARNING,
+        )
+        status_lbl.pack(side=tk.RIGHT, padx=(12, 0))
+
+        btn_close = ModernButton(header, t("align_scan.btn.close"), command=_on_close, width=84, height=32, font_size=10)
+        btn_close.pack(side=tk.RIGHT)
+
+        # Options
+        opts = tk.Frame(win, bg=Theme.BG_SECONDARY)
+        opts.pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        tk.Label(opts, text=t("align_scan.opt.top_k"), font=(FONT_UI, 10), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_MUTED).pack(side=tk.LEFT, padx=(16, 6))
+        top_k_var = tk.StringVar(value=str(max(2, min(int(self.settings.get("rag_top_k", 6) or 6), 12))))
+        top_k_spin = tk.Spinbox(
+            opts,
+            from_=2,
+            to=12,
+            textvariable=top_k_var,
+            width=5,
+            font=(FONT_UI, 10),
+            bg=Theme.BG_INPUT,
+            fg=Theme.TEXT_PRIMARY,
+            relief=tk.FLAT,
+        )
+        top_k_spin.pack(side=tk.LEFT)
+
+        tk.Label(opts, text=t("align_scan.opt.max_items"), font=(FONT_UI, 10), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_MUTED).pack(side=tk.LEFT, padx=(16, 6))
+        max_items_var = tk.StringVar(value=str(int(self.settings.get("align_scan_max_items", 220) or 220)))
+        max_items_spin = tk.Spinbox(
+            opts,
+            from_=30,
+            to=3000,
+            textvariable=max_items_var,
+            width=7,
+            font=(FONT_UI, 10),
+            bg=Theme.BG_INPUT,
+            fg=Theme.TEXT_PRIMARY,
+            relief=tk.FLAT,
+        )
+        max_items_spin.pack(side=tk.LEFT)
+
+        btn_scan = ModernButton(opts, t("align_scan.btn.scan"), command=lambda: None, width=110, height=32, font_size=10, accent=True)
+        btn_copy = ModernButton(opts, t("align_scan.btn.copy_report"), command=lambda: None, width=130, height=32, font_size=10)
+        btn_scan.pack(side=tk.RIGHT, padx=(8, 16))
+        btn_copy.pack(side=tk.RIGHT, padx=(8, 0))
+
+        body = tk.PanedWindow(win, orient=tk.HORIZONTAL, bg=Theme.BG_PRIMARY, sashwidth=8, relief=tk.FLAT, borderwidth=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+
+        left = tk.Frame(body, bg=Theme.BG_SECONDARY)
+        right = tk.Frame(body, bg=Theme.BG_SECONDARY)
+        body.add(left, minsize=360)
+        body.add(right, minsize=520)
+
+        tk.Label(left, text=t("align_scan.section.items"), font=(FONT_UI, 11, "bold"), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(14, 8))
+
+        list_container = tk.Frame(left, bg=Theme.BG_INPUT)
+        list_container.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+
+        listbox = tk.Listbox(
+            list_container,
+            font=(FONT_UI, max(11, int(self.font_size or 13))),
+            bg=Theme.BG_INPUT,
+            fg=Theme.TEXT_PRIMARY,
+            selectbackground=Theme.PRIMARY,
+            selectforeground="white",
+            exportselection=False,
+            relief=tk.FLAT,
+            borderwidth=0,
+            activestyle="none",
+        )
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        lb_scroll = tk.Scrollbar(list_container, orient="vertical", command=listbox.yview, bg=Theme.BG_TERTIARY, troughcolor=Theme.BG_INPUT)
+        lb_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox.configure(yscrollcommand=lb_scroll.set)
+
+        tk.Label(right, text=t("align_scan.section.detail"), font=(FONT_UI, 11, "bold"), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(14, 8))
+
+        detail_top = tk.Frame(right, bg=Theme.BG_SECONDARY)
+        detail_top.pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        score_lbl = tk.Label(detail_top, text="", font=(FONT_UI, 10), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_MUTED)
+        score_lbl.pack(side=tk.LEFT)
+
+        btn_open_polish = ModernButton(detail_top, t("align_scan.btn.open_polish"), command=lambda: None, width=130, height=32, font_size=10)
+        btn_open_polish.pack(side=tk.RIGHT)
+
+        detail_box = tk.Text(
+            right,
+            wrap=tk.CHAR,
+            height=18,
+            font=(FONT_UI, max(11, int(self.font_size or 13))),
+            bg=Theme.BG_INPUT,
+            fg=Theme.TEXT_PRIMARY,
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=12,
+            pady=12,
+        )
+        detail_box.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        self._bind_readonly_text(detail_box)
+
+        state = {"items": [], "report": ""}
+
+        def _set_status(text: str):
+            try:
+                status_lbl.config(text=text or "")
+            except Exception:
+                pass
+
+        def _format_exemplars(ex_list):
+            parts = []
+            for j, (score, node) in enumerate(ex_list or [], start=1):
+                cid = f"C{j}"
+                try:
+                    pdf = getattr(node, "pdf", "") or ""
+                    page = int(getattr(node, "page", 0) or 0)
+                    txt = (getattr(node, "text", "") or "").strip()
+                except Exception:
+                    pdf, page, txt = "", 0, ""
+                if max_ex_chars and len(txt) > max_ex_chars:
+                    txt = txt[:max_ex_chars].rstrip() + "…"
+                parts.append(f"{cid}  [{pdf}#p{page}]  {float(score or 0.0):.3f}\n{txt}\n")
+            return "\n".join(parts).strip()
+
+        def _render_detail(item):
+            try:
+                detail_box.config(state=tk.NORMAL)
+                detail_box.delete("1.0", tk.END)
+                if not item:
+                    detail_box.insert("1.0", t("align_scan.no_selection"))
+                else:
+                    detail_box.insert("1.0", (item.get("text", "") or "").strip() + "\n\n")
+                    detail_box.insert("end", f"--- {t('align_scan.detail.exemplars')} ---\n")
+                    detail_box.insert("end", _format_exemplars(item.get("exemplars", [])))
+                detail_box.config(state=tk.NORMAL)
+            except Exception:
+                pass
+
+        def _select_in_input(item):
+            if not item:
+                return
+            try:
+                start_off = int(item.get("start", 0) or 0)
+                end_off = int(item.get("end", 0) or 0)
+            except Exception:
+                return
+            if end_off <= start_off:
+                return
+            start = f"1.0+{start_off}c"
+            end = f"1.0+{end_off}c"
+            try:
+                self.input_text.tag_remove(tk.SEL, "1.0", tk.END)
+                self.input_text.tag_add(tk.SEL, start, end)
+                self.input_text.mark_set("insert", start)
+                self.input_text.see(start)
+            except Exception:
+                pass
+
+        def _get_selected_item():
+            try:
+                idxs = list(listbox.curselection() or [])
+                if not idxs:
+                    return None
+                items = state.get("items", [])
+                if not isinstance(items, list):
+                    return None
+                i = int(idxs[0])
+                if 0 <= i < len(items):
+                    return items[i]
+            except Exception:
+                return None
+            return None
+
+        def _open_polish_for_selected():
+            item = _get_selected_item()
+            if not item:
+                return
+            _select_in_input(item)
+            try:
+                self.open_polish_window()
+            except Exception:
+                pass
+
+        btn_open_polish.command = _open_polish_for_selected
+
+        def _on_select(_evt=None):
+            item = _get_selected_item()
+            if not item:
+                _render_detail(None)
+                try:
+                    score_lbl.config(text="")
+                    btn_open_polish.set_enabled(False)
+                except Exception:
+                    pass
+                return
+            _select_in_input(item)
+            _render_detail(item)
+            try:
+                score = float(item.get("score", 0.0) or 0.0)
+            except Exception:
+                score = 0.0
+            pct = int(max(0.0, min(1.0, score)) * 100)
+            try:
+                score_lbl.config(text=t("align_scan.detail.score", score=score, pct=pct))
+                btn_open_polish.set_enabled(True)
+            except Exception:
+                pass
+
+        listbox.bind("<<ListboxSelect>>", _on_select)
+
+        def _copy_scan_report():
+            txt = state.get("report", "") if isinstance(state, dict) else ""
+            txt = (txt or "").strip()
+            if not txt:
+                return
+            try:
+                self._copy_text(txt)
+            except Exception:
+                pass
+
+        btn_copy.command = _copy_scan_report
+
+        try:
+            max_ex_chars = int(self.settings.get("llm_exemplar_max_chars", 420) or 420)
+        except Exception:
+            max_ex_chars = 420
+        max_ex_chars = max(180, min(int(max_ex_chars), 1500))
+
+        def _scan_async():
+            try:
+                btn_scan.set_enabled(False)
+                btn_copy.set_enabled(False)
+            except Exception:
+                pass
+            _set_status(t("align_scan.status.scanning"))
+            listbox.delete(0, tk.END)
+            state["items"] = []
+            state["report"] = ""
+            _render_detail(None)
+            try:
+                btn_open_polish.set_enabled(False)
+            except Exception:
+                pass
+
+            def worker():
+                analysis_text = normalize_soft_line_breaks_preserve_len(raw_text)
+                lang = LanguageDetector.detect(analysis_text)
+                sents = split_sentences_with_positions(analysis_text, lang)
+
+                try:
+                    top_k = int(top_k_var.get() or 6)
+                except Exception:
+                    top_k = 6
+                top_k = max(2, min(int(top_k), 12))
+
+                try:
+                    max_items = int(max_items_var.get() or 220)
+                except Exception:
+                    max_items = 220
+                max_items = max(30, min(int(max_items), 3000))
+
+                # Basic filtering to keep the scan focused.
+                candidates = []
+                for sent, s, e in sents:
+                    st = (sent or "").strip()
+                    if len(st) < 20:
+                        continue
+                    if len(st) > 1200:
+                        st = st[:1200].rstrip() + "…"
+                    candidates.append((st, int(s), int(e)))
+                    if len(candidates) >= max_items:
+                        break
+
+                sess = self._get_rag_session()
+                if sess is None:
+                    win.after(0, lambda: _set_status(t("align_scan.status.failed")))
+                    win.after(0, lambda: btn_scan.set_enabled(True))
+                    return
+
+                items = []
+                total = len(candidates)
+                t0 = time.time()
+                with self._rag_session_lock:
+                    for i, (st, s, e) in enumerate(candidates, start=1):
+                        if cancel_event.is_set():
+                            return
+                        ex = sess.search(st, top_k=top_k)
+                        score = float(ex[0][0]) if ex else 0.0
+                        items.append({"text": st, "start": s, "end": e, "score": score, "exemplars": ex[:top_k]})
+                        if i == total or (i % 8) == 0:
+                            msg = t("align_scan.status.progress", current=i, total=total)
+                            win.after(0, lambda m=msg: _set_status(m))
+                items.sort(key=lambda d: float(d.get("score", 0.0) or 0.0))
+
+                def ui_done():
+                    if cancel_event.is_set() or not getattr(win, "winfo_exists", lambda: 0)():
+                        return
+                    state["items"] = items
+                    listbox.delete(0, tk.END)
+                    for idx, it in enumerate(items, start=1):
+                        s = (it.get("text", "") or "").replace("\n", " ").strip()
+                        if len(s) > 90:
+                            s = s[:87].rstrip() + "…"
+                        sc = float(it.get("score", 0.0) or 0.0)
+                        pct = int(max(0.0, min(1.0, sc)) * 100)
+                        listbox.insert(tk.END, f"{pct:3d}%  {s}")
+
+                    # Build a lightweight, white-box scan report (worst-first).
+                    top_n = min(20, len(items))
+                    report_lines = []
+                    report_lines.append(f"# {t('align_scan.report_title')}")
+                    report_lines.append(f"- {t('align_scan.report_library')}: {self.current_library}")
+                    report_lines.append(f"- {t('align_scan.report_items')}: {len(items)}")
+                    report_lines.append(f"- {t('align_scan.report_top_k')}: {top_k}")
+                    report_lines.append("")
+                    for j in range(top_n):
+                        it = items[j]
+                        sc = float(it.get("score", 0.0) or 0.0)
+                        pct = int(max(0.0, min(1.0, sc)) * 100)
+                        report_lines.append(f"## {j+1}. {t('align_scan.report_alignment')}: {pct}% ({sc:.3f})")
+                        report_lines.append((it.get("text", "") or "").strip())
+                        report_lines.append("")
+                        report_lines.append(t("align_scan.detail.exemplars") + ":")
+                        report_lines.append(_format_exemplars(it.get("exemplars", [])))
+                        report_lines.append("")
+                    state["report"] = "\n".join(report_lines).strip()
+
+                    if items:
+                        listbox.selection_set(0)
+                        listbox.activate(0)
+                        _on_select()
+                    dt = max(0.1, time.time() - t0)
+                    _set_status(t("align_scan.status.done", total=len(items), seconds=dt))
+                    try:
+                        btn_scan.set_enabled(True)
+                        btn_copy.set_enabled(bool(state.get("report", "").strip()))
+                    except Exception:
+                        pass
+
+                win.after(0, ui_done)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        btn_scan.command = _scan_async
+
+        # Run once immediately.
+        win.after(50, _scan_async)
 
     def analyze_text(self):
         raw_text = self.input_text.get("1.0", tk.END).strip()

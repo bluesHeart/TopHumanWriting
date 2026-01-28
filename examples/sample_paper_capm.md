@@ -17,15 +17,15 @@ Early empirical studies by Black, Jensen, and Scholes (1972) and Fama and MacBet
 **3. Theoretical Framework**
 CAPM is derived from Markowitz’s portfolio theory and assumes investors are rational, risk-averse, and hold diversified portfolios. The model expresses expected return as:
 
-\[
-E(R_i) = R_f + \beta_i [E(R_m) - R_f]
-\]
+\\[
+E(R_i) = R_f + \\beta_i [E(R_m) - R_f]
+\\]
 
-where \(E(R_i)\) is the expected return on asset \(i\), \(R_f\) is the risk-free rate, \(E(R_m)\) is the expected market return, and \(\beta_i\) is the asset’s sensitivity to market movements. Beta is calculated as:
+where \\(E(R_i)\\) is the expected return on asset \\(i\\), \\(R_f\\) is the risk-free rate, \\(E(R_m)\\) is the expected market return, and \\(\\beta_i\\) is the asset’s sensitivity to market movements. Beta is calculated as:
 
-\[
-\beta_i = \frac{\text{Cov}(R_i, R_m)}{\text{Var}(R_m)}.
-\]
+\\[
+\\beta_i = \\frac{\\text{Cov}(R_i, R_m)}{\\text{Var}(R_m)}.
+\\]
 
 Despite its elegance, CAPM’s assumptions are often violated in real markets, prompting questions about its empirical robustness.
 
