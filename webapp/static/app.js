@@ -166,7 +166,7 @@
 
   function route() {
     const h = (location.hash || "").replace("#", "").trim();
-    return h || "library";
+    return h || "home";
   }
 
   function setRoute(name) {
@@ -257,21 +257,21 @@
     let nextBtn = "";
 
     if (k === "semantic") {
-      title = "Semantic（语义索引）";
-      desc = "用于语义向量化（句子 embeddings）。主要由“建库”阶段生成。";
+      title = "语义索引（句向量）";
+      desc = "用于把句子变成“可检索的向量”，让相似度更准。主要由“建库”阶段生成。";
       need = "不是所有功能都依赖它，但建议建库时一并生成。";
       nextRoute = "library";
       nextBtn = "去文献库";
     } else if (k === "rag") {
-      title = "RAG（范文检索索引）";
-      desc = "用于“对齐扫描/对齐润色”的范文段落检索（FAISS）。";
-      need = "对齐扫描/对齐润色需要它。";
+      title = "范文索引（用于检索对照）";
+      desc = "用于“对齐扫描/对齐润色”的范文段落检索（离线）。";
+      need = "扫描/润色都需要它。";
       nextRoute = "library";
-      nextBtn = "去建库（RAG）";
+      nextBtn = "去建库";
     } else if (k === "cite") {
-      title = "Cite（引用句式库）";
-      desc = "用于“引用借鉴”：抽取 author-year 引用句子 + References，并做可检索的句式库。";
-      need = "引用借鉴需要它；与 RAG 独立，可单独构建。";
+      title = "引用句式库（引用借鉴）";
+      desc = "从范文中抽取“引用句子 + 参考文献”，并做可检索的句式库。";
+      need = "引用借鉴需要它；与范文索引独立，可单独构建。";
       nextRoute = "cite";
       nextBtn = "去引用借鉴";
     }
@@ -318,14 +318,14 @@
     const map = {
       starting: "准备中",
       pdf_extract: "抽取 PDF 文本",
-      semantic_embed: "语义向量化（Semantic）",
-      rag_extract: "切分范文段落（RAG）",
-      rag_embed: "向量化范文段落（RAG）",
-      rag_done: "RAG 完成",
-      cite_extract: "抽取引用句子/References（Cite）",
-      cite_embed: "向量化引用句子（Cite）",
-      cite_index: "构建引用检索（Cite）",
-      cite_done: "Cite 完成",
+      semantic_embed: "生成语义索引（句向量）",
+      rag_extract: "切分范文段落",
+      rag_embed: "向量化范文段落",
+      rag_done: "范文索引完成",
+      cite_extract: "抽取引用句子/参考文献",
+      cite_embed: "向量化引用句子",
+      cite_index: "构建引用检索",
+      cite_done: "引用句式库完成",
     };
     return map[s] || String(stage || "—");
   }
@@ -340,10 +340,10 @@
         {
           class: "chip " + (status.semantic_index ? "ok" : "warn"),
           type: "button",
-          title: "Semantic（语义索引）状态与说明",
+          title: "语义索引（句向量）状态与说明",
           onclick: () => openIndexModal("semantic", status),
         },
-        "Semantic"
+        "语义"
       )
     );
     box.appendChild(
@@ -352,10 +352,10 @@
         {
           class: "chip " + (status.rag_index ? "ok" : "bad"),
           type: "button",
-          title: "RAG（范文检索索引）状态与说明",
+          title: "范文索引状态与说明",
           onclick: () => openIndexModal("rag", status),
         },
-        "RAG"
+        "范文"
       )
     );
     box.appendChild(
@@ -364,10 +364,10 @@
         {
           class: "chip " + (status.cite_index ? "ok" : "warn"),
           type: "button",
-          title: "Cite（引用句式库）状态与说明",
+          title: "引用句式库状态与说明",
           onclick: () => openIndexModal("cite", status),
         },
-        "Cite"
+        "引用"
       )
     );
   }
@@ -693,8 +693,229 @@
     return list;
   }
 
+  const HOME_SAMPLE_TEXT =
+    "This paper studies how risk premia vary with market conditions. We document strong cross-sectional dispersion and show that a parsimonious factor model explains most of the variation.";
+
+  function pageHome() {
+    renderHeader("开始", "把你的段落写得更像顶级范文：先对照证据，再受控改写（白箱可追溯）。");
+
+    const root = el("div", { class: "home" });
+    const inner = el("div", { class: "home-inner" });
+
+    const hero = el(
+      "div",
+      { class: "home-hero" },
+      el("div", { class: "home-title" }, "TopHumanWriting"),
+      el("div", { class: "home-sub" }, "模仿同领域顶级人类范文写法 · 避免 AI 味 · 证据可追溯"),
+      el(
+        "div",
+        { class: "home-kicker" },
+        "扫描不调用大模型；润色才调用本地模型 / 可选 API（温度固定 0，尽量不发散）。"
+      )
+    );
+
+    const modeKey = "aiw.homeMode";
+    const savedMode = localStorage.getItem(modeKey) || "scan";
+    let mode = savedMode === "polish" || savedMode === "cite" ? savedMode : "scan";
+
+    const text = el("textarea", { class: "textarea home-textarea", placeholder: "粘贴你要改的句子/段落（中英混合可）…" });
+    const homeDraftKey = "aiw.homeDraft";
+    text.value = localStorage.getItem(homeDraftKey) || "";
+    text.addEventListener("input", () => localStorage.setItem(homeDraftKey, text.value || ""));
+
+    function modeChip(id, label, desc) {
+      const b = el(
+        "button",
+        {
+          class: "pill",
+          type: "button",
+          "data-mode": id,
+          onclick: () => {
+            mode = id;
+            localStorage.setItem(modeKey, mode);
+            renderModeUI();
+          },
+        },
+        label
+      );
+      b.title = desc || "";
+      return b;
+    }
+
+    const modeRow = el(
+      "div",
+      { class: "home-modes" },
+      modeChip("scan", "🧭 找出最不像范文的句子", "只做检索对照，不调用大模型"),
+      modeChip("polish", "✨ 生成对齐润色（白箱）", "会调用本地模型/大模型 API 输出诊断+改写+证据"),
+      modeChip("cite", "🔖 借鉴引用句式", "检索范文里“怎么引文/怎么表述贡献”")
+    );
+
+    const hint = el("div", { class: "home-hint" });
+    const primaryBtn = el("button", { class: "btn btn-primary home-primary", type: "button" }, "开始");
+    const secondaryBtn = el("button", { class: "btn home-secondary", type: "button" }, "导入范文库…");
+    const sampleBtn = el("button", { class: "btn btn-ghost", type: "button" }, "填入示例");
+    const clearBtn = el("button", { class: "btn btn-ghost", type: "button" }, "清空");
+
+    sampleBtn.onclick = () => {
+      text.value = HOME_SAMPLE_TEXT;
+      localStorage.setItem(homeDraftKey, text.value);
+      try {
+        text.focus();
+      } catch {}
+      toast("已填入示例文本。");
+    };
+    clearBtn.onclick = () => {
+      text.value = "";
+      localStorage.setItem(homeDraftKey, "");
+      toast("已清空。");
+    };
+
+    secondaryBtn.onclick = () => setRoute("library");
+
+    primaryBtn.onclick = () => {
+      if (!state.library) return toast("先在右上角选择/创建一个“文献库”。", "bad", 4500);
+      const raw = (text.value || "").trim();
+      if (!raw) return toast("请先粘贴文本。", "bad");
+
+      if (mode === "scan") {
+        state.scanDraft = raw;
+        localStorage.setItem("aiw.scanDraft", state.scanDraft);
+        localStorage.setItem("aiw.scanAutoRun", "1");
+        setRoute("scan");
+        return;
+      }
+      if (mode === "polish") {
+        state.polishDraft = raw;
+        localStorage.setItem("aiw.polishDraft", state.polishDraft);
+        localStorage.setItem("aiw.polishAutoRun", "generate");
+        setRoute("polish");
+        return;
+      }
+      if (mode === "cite") {
+        localStorage.setItem("aiw.citeQueryDraft", raw);
+        localStorage.setItem("aiw.citeAutoRun", "1");
+        setRoute("cite");
+        return;
+      }
+    };
+
+    text.addEventListener("keydown", (e) => {
+      if (!e) return;
+      // Ctrl+Enter / Cmd+Enter to run.
+      const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || "");
+      const hot = isMac ? e.metaKey && e.key === "Enter" : e.ctrlKey && e.key === "Enter";
+      if (hot) {
+        e.preventDefault();
+        primaryBtn.click();
+      }
+    });
+
+    const statusRow = el("div", { class: "home-status" });
+
+    function statusPill(label, ok, onClick) {
+      if (typeof onClick !== "function") {
+        return el("span", { class: "pill small static " + (ok ? "ok" : "bad") }, label);
+      }
+      const b = el("button", { class: "pill small " + (ok ? "ok" : "bad"), type: "button" }, label);
+      b.onclick = onClick;
+      return b;
+    }
+
+    function renderStatus() {
+      clear(statusRow);
+      const st = state.libraryStatus || {};
+      const ragOk = !!st.rag_index;
+      const citeOk = !!st.cite_index;
+
+      statusRow.appendChild(statusPill(state.library ? `📚 当前库：${state.library}` : "📚 未选择文献库", !!state.library));
+      statusRow.appendChild(statusPill(ragOk ? "✅ 范文索引就绪" : "⚠️ 范文索引未建", ragOk, () => openIndexModal("rag", st)));
+      statusRow.appendChild(statusPill(citeOk ? "✅ 引用句式库就绪" : "⚠️ 引用句式库未建", citeOk, () => openIndexModal("cite", st)));
+
+      const provider = localStorage.getItem("aiw.llmProvider") || "local";
+      let llmOk = false;
+      let llmLabel = "";
+      if (provider === "api") {
+        const api = state.llmApi || {};
+        llmOk = !!(api.api_key_present && String(api.base_url || "").trim() && String(api.model || "").trim());
+        llmLabel = llmOk ? "🧠 API 已配置" : "⚠️ API 未配置";
+      } else {
+        const ls = state.llm || {};
+        const hasAssets = !!(ls.server_ok && ls.model_ok);
+        llmOk = hasAssets;
+        llmLabel = ls.running ? "🧠 本地模型运行中" : hasAssets ? "🧠 本地模型已安装" : "⚠️ 本地模型缺失";
+      }
+      statusRow.appendChild(statusPill(llmLabel, llmOk, () => setRoute("llm")));
+    }
+
+    function renderModeUI() {
+      $$(".pill[data-mode]").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+      if (mode === "scan") {
+        hint.textContent = "会把你的正文按句切分，找出最不像范文的句子，并给出每句对应的范文证据（可点“润色这个句子”继续）。";
+        primaryBtn.textContent = "开始扫描";
+      } else if (mode === "polish") {
+        hint.textContent = "会先检索范文证据（C1..Ck），再生成“诊断 + 轻改/中改 + 引用证据”，让句式更贴近范文。";
+        primaryBtn.textContent = "生成对齐润色";
+      } else if (mode === "cite") {
+        hint.textContent = "会在范文库中检索相似的引用句式（如 Following…, We contribute…, (Smith, 2020)）。";
+        primaryBtn.textContent = "检索引用句式";
+      }
+    }
+
+    const inputCard = el(
+      "div",
+      { class: "card home-card" },
+      modeRow,
+      text,
+      el("div", { class: "home-actions" }, primaryBtn),
+      el("div", { class: "home-subactions" }, secondaryBtn, sampleBtn, clearBtn),
+      el("div", { class: "muted" }, hint)
+    );
+
+    const onboarding = el("div", { class: "home-onboard" });
+    function renderOnboarding() {
+      clear(onboarding);
+      const st = state.libraryStatus || {};
+      if (!state.library) {
+        onboarding.appendChild(
+          el(
+            "div",
+            { class: "card" },
+            el("div", { class: "label" }, "第一次使用（3 步）"),
+            el("ol", null, el("li", null, "创建文献库（右上角选择框旁，或去“文献库”页）。"), el("li", null, "导入同领域 PDF 范文到本地库。"), el("li", null, "开始建库（生成范文索引）。")),
+            el("div", { class: "row" }, el("button", { class: "btn btn-primary", type: "button", onclick: () => setRoute("library") }, "去文献库"))
+          )
+        );
+        return;
+      }
+
+      if (!st.rag_index) {
+        onboarding.appendChild(
+          el(
+            "div",
+            { class: "card" },
+            el("div", { class: "label" }, "还不能扫描/润色：缺少“范文索引”"),
+            el("div", { class: "muted" }, "先到“文献库”完成：导入 PDF → 开始建库。完成后再回来。"),
+            el("div", { class: "row" }, el("button", { class: "btn btn-primary", type: "button", onclick: () => setRoute("library") }, "去建库"))
+          )
+        );
+      }
+    }
+
+    inner.appendChild(hero);
+    inner.appendChild(inputCard);
+    inner.appendChild(statusRow);
+    inner.appendChild(onboarding);
+    root.appendChild(inner);
+
+    renderModeUI();
+    renderStatus();
+    renderOnboarding();
+
+    return root;
+  }
+
   function pageLibrary() {
-    renderHeader("文献库", "导入同领域顶级 PDF → 建索引（FAISS/LlamaIndex）→ 用于白箱对齐写作。");
+    renderHeader("文献库", "导入同领域顶级 PDF 范文 → 建索引 → 用于扫描/润色/引用借鉴（离线保存）。");
     const root = el("div", { class: "grid", style: "gap:18px" });
 
     const createName = el("input", { class: "input", placeholder: "新建库名（例如：finance_2026）", style: "flex:1; min-width:320px" });
@@ -1033,7 +1254,7 @@
         onclick: async () => {
           if (!state.library) return toast("请先选择文献库。", "bad");
           if (!(state.libraryStatus && state.libraryStatus.rag_index)) {
-            toast("缺少 RAG（范文检索索引）：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
+            toast("缺少范文索引：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
             return openIndexModal("rag", state.libraryStatus || {});
           }
           const raw = (text.value || "").trim();
@@ -1071,7 +1292,7 @@
       }
       const ragOk = !!(state.libraryStatus && state.libraryStatus.rag_index);
       if (!ragOk) {
-        resultsBox.appendChild(el("div", { class: "label" }, "还不能扫描：缺少 RAG（范文检索索引）"));
+        resultsBox.appendChild(el("div", { class: "label" }, "还不能扫描：缺少范文索引"));
         resultsBox.appendChild(el("div", { class: "muted" }, "先到“文献库”完成：导入 PDF → 建索引。完成后再回来扫描。"));
         resultsBox.appendChild(
           el(
@@ -1103,60 +1324,60 @@
     }
     renderEmptyResultsHint();
 
-    function renderScanResults() {
-      clear(resultsBox);
-      const items = (state.lastScan && state.lastScan.items) || [];
+      function renderScanResults() {
+        clear(resultsBox);
+        const items = (state.lastScan && state.lastScan.items) || [];
       if (!items.length) {
         resultsBox.appendChild(el("div", { class: "muted" }, "没有可扫描的句子（太短会被跳过）。"));
         return;
       }
       resultsBox.appendChild(el("div", { class: "label" }, `找到 ${items.length} 条句子（按对齐度从低到高排序）`));
       const list = el("div", { class: "list" });
-      for (const it of items) {
+        for (const it of items) {
         const pct = Number(it.pct || 0);
         const badgeCls = pct >= 80 ? "badge good" : pct >= 60 ? "badge" : "badge bad";
         const sent = String(it.text || "");
-        const head = el(
-          "div",
-          { class: "item-header" },
-          el(
+          const head = el(
             "div",
-            null,
-            el("span", { class: badgeCls }, `${pct}%`),
-            " ",
-            el("span", null, sent.slice(0, 220) + (sent.length > 220 ? "…" : ""))
-          ),
-          el(
-            "div",
-            { class: "row" },
+            { class: "item-header" },
             el(
-              "button",
-              {
-                class: "btn btn-small",
-                type: "button",
-                onclick: () => openModal("范文对照（Top-K）", exemplarList(it.exemplars || [], { library: state.library })),
-              },
-              "查看范文"
+              "div",
+              null,
+              el("span", { class: badgeCls }, `${pct}%`),
+              " ",
+              el("span", null, sent.slice(0, 220) + (sent.length > 220 ? "…" : ""))
             ),
             el(
-              "button",
-              {
-                class: "btn btn-small btn-primary",
-                type: "button",
-                onclick: () => {
-                  state.polishDraft = String(it.text || "");
-                  localStorage.setItem("aiw.polishDraft", state.polishDraft);
-                  setRoute("polish");
+              "div",
+              { class: "actions-col" },
+              el(
+                "button",
+                {
+                  class: "btn btn-small",
+                  type: "button",
+                  onclick: () => openModal("范文对照（Top-K）", exemplarList(it.exemplars || [], { library: state.library })),
                 },
-              },
-              "润色这个句子"
+                "查看范文"
+              ),
+              el(
+                "button",
+                {
+                  class: "btn btn-small btn-primary",
+                  type: "button",
+                  onclick: () => {
+                    state.polishDraft = String(it.text || "");
+                    localStorage.setItem("aiw.polishDraft", state.polishDraft);
+                    setRoute("polish");
+                  },
+                },
+                "润色这个句子"
+              )
             )
-          )
-        );
-        list.appendChild(el("div", { class: "item" }, head));
+          );
+          list.appendChild(el("div", { class: "item" }, head));
+        }
+        resultsBox.appendChild(list);
       }
-      resultsBox.appendChild(list);
-    }
 
     const inputCard = el(
       "div",
@@ -1182,11 +1403,21 @@
         resultsBox
       )
     );
+
+    const autoRun = localStorage.getItem("aiw.scanAutoRun") === "1";
+    if (autoRun) {
+      localStorage.removeItem("aiw.scanAutoRun");
+      window.setTimeout(() => {
+        try {
+          runBtn.click();
+        } catch {}
+      }, 80);
+    }
     return root;
   }
 
   function pagePolish() {
-    renderHeader("对齐润色", "白箱：范文对照 + 证据引用 + 受控改写（默认本地 Qwen，可切换 API）。");
+    renderHeader("对齐润色", "白箱：范文对照 + 证据引用 + 受控改写（默认离线本地模型，可切换 API）。");
     const root = el("div", { class: "grid", style: "gap:18px" });
 
     const selected = el("textarea", { class: "textarea", placeholder: "选中要润色的句子/段落…" });
@@ -1238,7 +1469,7 @@
     const providerSel = el(
       "select",
       { class: "select", style: "width:220px" },
-      el("option", { value: "local" }, "本地 Qwen（llama.cpp）"),
+      el("option", { value: "local" }, "本地 Qwen（离线）"),
       el("option", { value: "api" }, "大模型 API（OpenAI兼容）")
     );
     providerSel.value = localStorage.getItem("aiw.llmProvider") || "local";
@@ -1283,7 +1514,7 @@
       }
       const ragOk = !!(state.libraryStatus && state.libraryStatus.rag_index);
       if (!ragOk) {
-        exemplarsBox.appendChild(el("div", { class: "label" }, "缺少 RAG（范文检索索引）"));
+        exemplarsBox.appendChild(el("div", { class: "label" }, "缺少范文索引"));
         exemplarsBox.appendChild(el("div", { class: "muted" }, "先到“文献库”完成：导入 PDF → 建索引。完成后再回来润色。"));
         exemplarsBox.appendChild(
           el(
@@ -1352,7 +1583,7 @@
     async function fetchExemplars() {
       if (!state.library) return toast("请先选择文献库。", "bad");
       if (!(state.libraryStatus && state.libraryStatus.rag_index)) {
-        toast("缺少 RAG（范文检索索引）：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
+        toast("缺少范文索引：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
         openIndexModal("rag", state.libraryStatus || {});
         throw new Error("rag index missing (build library first)");
       }
@@ -1397,9 +1628,9 @@
         outBox.appendChild(el("div", { class: "muted" }, `LLM：API · ${llmInfo.model || "—"} · ${llmInfo.base_url || "—"}`));
       } else if (llmInfo && llmInfo.provider === "local") {
         const mp = String(llmInfo.model_path || "");
-        outBox.appendChild(el("div", { class: "muted" }, `LLM：${mp ? mp.split(/[\\\\/]/).pop() : "—"}（llama.cpp）`));
+        outBox.appendChild(el("div", { class: "muted" }, `LLM：${mp ? mp.split(/[\\\\/]/).pop() : "—"}（本地）`));
       } else if (state.llm && state.llm.model_path) {
-        outBox.appendChild(el("div", { class: "muted" }, `LLM：${String(state.llm.model_path).split(/[\\\\/]/).pop()}（llama.cpp）`));
+        outBox.appendChild(el("div", { class: "muted" }, `LLM：${String(state.llm.model_path).split(/[\\\\/]/).pop()}（本地）`));
       }
 
       // White-box alignment score before/after (retrieval-only, no LLM).
@@ -1659,7 +1890,7 @@
         onclick: async () => {
           if (!state.library) return toast("请先选择文献库。", "bad");
           if (!(state.libraryStatus && state.libraryStatus.rag_index)) {
-            toast("缺少 RAG（范文检索索引）：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
+            toast("缺少范文索引：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
             return openIndexModal("rag", state.libraryStatus || {});
           }
           const txt = (selected.value || "").trim();
@@ -1690,6 +1921,9 @@
           genBtn.disabled = true;
           genBtn.textContent = provider === "api" ? "生成中…（API 请求中）" : "生成中…（首次会加载模型）";
           renderOutGenerating(provider);
+          try {
+            outBox.scrollIntoView({ behavior: "smooth", block: "start" });
+          } catch {}
           try {
             await refreshLLMStatus();
             const r = await apiPost("/api/align/polish", {
@@ -1775,19 +2009,31 @@
       el("div", { class: "muted" }, "提示：先“获取范文对照”再生成，能更清楚看到 C1..Ck 是哪些证据。")
     );
 
+    const leftCol = el("div", { class: "grid", style: "gap:18px" }, inputCard, outBox);
+
     const topGrid = el(
       "div",
       { class: "grid two", style: "gap:18px; align-items:start; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr)" },
-      inputCard,
+      leftCol,
       exemplarsBox
     );
     root.appendChild(topGrid);
-    root.appendChild(outBox);
+
+    const auto = localStorage.getItem("aiw.polishAutoRun") || "";
+    if (auto) {
+      localStorage.removeItem("aiw.polishAutoRun");
+      window.setTimeout(() => {
+        try {
+          if (auto === "exemplars") exBtn.click();
+          else if (auto === "generate") genBtn.click();
+        } catch {}
+      }, 120);
+    }
     return root;
   }
 
   function pageCite() {
-    renderHeader("引用借鉴", "抽取“引用句子 + References”，构建可检索的范文句式库（白箱）。");
+    renderHeader("引用借鉴", "抽取“引用句子 + 参考文献”，构建可检索的范文句式库（白箱）。");
     const root = el("div", { class: "grid", style: "gap:18px" });
 
     const statusBox = el("div", { class: "card" }, el("div", { class: "muted" }, "正在读取引用库状态…"));
@@ -1814,7 +2060,7 @@
           )
         );
         if (!ok) {
-          statusBox.appendChild(el("div", { class: "muted" }, "提示：先建库（RAG）后，再在本页抽取引用句子会更顺。"));
+          statusBox.appendChild(el("div", { class: "muted" }, "提示：先建好“范文索引”后，再抽取引用句子会更顺。"));
         }
       } catch (e) {
         clear(statusBox);
@@ -1924,6 +2170,7 @@
     }
 
     const query = el("input", { class: "input", placeholder: "搜索：例如 “Following”, “we contribute”, “et al.”", style: "flex:1; min-width:360px" });
+    query.value = localStorage.getItem("aiw.citeQueryDraft") || "";
     const topk = el("input", { class: "input", value: "10", style: "width:100px", inputmode: "numeric" });
     const searchBtn = el(
       "button",
@@ -1989,7 +2236,7 @@
             )
           )
         );
-        openModal(`References · ${pdfRel}`, body);
+        openModal(`参考文献 · ${pdfRel}`, body);
       } catch (e) {
         toast(String(e.message || e), "bad", 6500);
       }
@@ -2062,7 +2309,7 @@
         el("div", { class: "row" }, maxPages, buildBtn, citeCancelBtn),
         citeProgress,
         citeProgressText,
-        el("div", { class: "muted" }, "说明：仅抽取 author-year 引用句子（如 Smith (2020) / (Smith, 2020; …)）与 References。")
+        el("div", { class: "muted" }, "说明：仅抽取“作者-年份”引用句子（如 Smith (2020) / (Smith, 2020; …)）与参考文献。")
       )
     );
 
@@ -2073,7 +2320,7 @@
         "div",
         { class: "card" },
         el("div", { class: "label" }, "检索范文引用句式"),
-        el("div", { class: "row" }, query, el("span", { class: "label" }, "top_k"), topk, searchBtn),
+        el("div", { class: "row" }, query, el("span", { class: "label" }, "返回条数"), topk, searchBtn),
         el("div", { class: "muted" }, "用途：找“顶级论文怎么写这句话/怎么引文”，并复制句式（白箱可追溯）。")
       )
     );
@@ -2082,11 +2329,21 @@
 
     syncStatus().catch(() => {});
     if (state.citeTaskId) startCitePolling();
+
+    const autoRun = localStorage.getItem("aiw.citeAutoRun") === "1";
+    if (autoRun) {
+      localStorage.removeItem("aiw.citeAutoRun");
+      window.setTimeout(() => {
+        try {
+          searchBtn.click();
+        } catch {}
+      }, 120);
+    }
     return root;
   }
 
   function pageLLM() {
-    renderHeader("LLM 设置", "支持：本地 llama.cpp（离线） / OpenAI-compatible API（可选）。");
+    renderHeader("LLM 设置", "支持：本地模型（离线） / 大模型 API（可选）。");
     const root = el("div", { class: "grid", style: "gap:18px" });
 
     const providerSel = el(
@@ -2111,7 +2368,7 @@
       )
     );
 
-    // Local llama.cpp (offline)
+    // Local model (offline)
     const serverPath = el("input", { class: "input", style: "flex:1", placeholder: "llama-server.exe 路径" });
     const modelPath = el("input", { class: "input", style: "flex:1", placeholder: "GGUF 模型路径（例如 qwen2.5-3b…gguf）" });
     const ctx = el("input", { class: "input", style: "width:100px", value: "2048", inputmode: "numeric" });
@@ -2135,7 +2392,7 @@
         ["running", String(!!st.running)],
         ["base_url", st.base_url || ""],
       ];
-      localStatusBox.appendChild(el("div", { class: "label" }, "本地 llama.cpp 状态"));
+      localStatusBox.appendChild(el("div", { class: "label" }, "本地模型状态"));
       localStatusBox.appendChild(
         el(
           "div",
@@ -2240,7 +2497,7 @@
       el(
         "div",
         { class: "card" },
-        el("div", { class: "label" }, "本地 llama.cpp（离线）"),
+        el("div", { class: "label" }, "本地模型（离线）"),
         el("div", { class: "row" }, el("span", { class: "label" }, "server"), serverPath),
         el("div", { class: "row" }, el("span", { class: "label" }, "model"), modelPath),
         el(
@@ -2417,8 +2674,8 @@
         "div",
         { class: "card" },
         el("div", { class: "label" }, "Qwen 的作用在哪里？"),
-        el("div", null, "扫描：只用向量检索（FAISS），不调用 LLM。"),
-        el("div", null, "润色：默认调用本地 Qwen（llama.cpp）输出 JSON（诊断 + 轻改/中改 + 引用证据）。也可切换到大模型 API（OpenAI 兼容）。"),
+        el("div", null, "扫描：只做离线检索对照，不调用大模型。"),
+        el("div", null, "润色：默认调用本地 Qwen 输出 JSON（诊断 + 轻改/中改 + 引用证据）。也可切换到大模型 API（OpenAI 兼容）。"),
         el("div", { class: "muted" }, "如何确认：对齐润色结果顶部会显示“LLM：…”；并展示“对齐度（检索得分）”对比原文/轻改/中改。")
       )
     );
@@ -2427,6 +2684,9 @@
   async function render() {
     const my = ++renderSeq;
     const r = route();
+    try {
+      document.body.dataset.route = r;
+    } catch {}
     navActive(r);
     const page = $("#page");
     clear(page);
@@ -2443,12 +2703,14 @@
     }
 
     if (my !== renderSeq) return;
-    if (r === "scan") page.appendChild(pageScan());
+    if (r === "home") page.appendChild(pageHome());
+    else if (r === "library") page.appendChild(pageLibrary());
+    else if (r === "scan") page.appendChild(pageScan());
     else if (r === "polish") page.appendChild(pagePolish());
     else if (r === "cite") page.appendChild(pageCite());
     else if (r === "llm") page.appendChild(pageLLM());
     else if (r === "help") page.appendChild(pageHelp());
-    else page.appendChild(pageLibrary());
+    else page.appendChild(pageHome());
   }
 
   function bindEvents() {

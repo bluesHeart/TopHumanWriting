@@ -48,6 +48,10 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+body[data-route="home"] #indexChips {
+  display: none;
+}
+
 .app {
   display: flex;
   min-height: 100vh;
@@ -195,6 +199,157 @@ body {
   max-width: 1260px;
   width: 100%;
   margin: 0 auto;
+}
+
+.home {
+  display: grid;
+}
+
+.home-inner {
+  width: min(900px, 100%);
+  margin: 0 auto;
+  display: grid;
+  gap: 18px;
+}
+
+.home-hero {
+  text-align: center;
+  margin-top: 10px;
+}
+
+.home-title {
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+}
+
+.home-sub {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.home-kicker {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.home-card {
+  padding: 20px 22px;
+}
+
+.home-modes {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.pill {
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  padding: 10px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.2;
+  transition: background 140ms ease-out, border-color 140ms ease-out, transform 140ms ease-out;
+}
+
+.pill:hover {
+  background: rgba(20, 184, 166, 0.08);
+  border-color: rgba(20, 184, 166, 0.35);
+}
+
+.pill:active {
+  transform: translateY(1px);
+}
+
+.pill:focus {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+.pill.static {
+  cursor: default;
+  user-select: none;
+}
+
+.pill.active {
+  background: rgba(20, 184, 166, 0.12);
+  border-color: rgba(20, 184, 166, 0.4);
+}
+
+.pill.small {
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.pill.ok {
+  border-color: rgba(22, 163, 74, 0.5);
+  background: rgba(22, 163, 74, 0.1);
+}
+
+.pill.bad {
+  border-color: rgba(220, 38, 38, 0.55);
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.home-textarea {
+  min-height: 180px;
+  border-radius: 16px;
+  padding: 14px 14px;
+  line-height: 1.75;
+}
+
+.home-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+.home-primary {
+  min-width: 210px;
+  padding: 12px 18px;
+  border-radius: 14px;
+}
+
+.home-subactions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.home-status {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.home-onboard {
+  display: grid;
+  gap: 14px;
+}
+
+.actions-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+  min-width: 128px;
+}
+
+.actions-col .btn {
+  width: 100%;
 }
 
 .card {

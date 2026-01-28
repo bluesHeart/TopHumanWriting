@@ -20,6 +20,10 @@
         </div>
 
         <nav class="nav" aria-label="主导航">
+          <button class="nav-item" data-route="home" type="button">
+            <span class="nav-icon" aria-hidden="true">🏠</span>
+            <span class="nav-label">开始</span>
+          </button>
           <button class="nav-item" data-route="library" type="button">
             <span class="nav-icon" aria-hidden="true">📚</span>
             <span class="nav-label">文献库</span>
@@ -63,7 +67,7 @@
               <option value="crimson">Crimson</option>
             </select>
           </div>
-          <div class="sidebar-hint">离线：检索（FAISS）+ 句式库（Cite）+ 生成（Qwen 3B, llama.cpp）</div>
+          <div class="sidebar-hint">离线：范文检索 + 句式库 + 本地模型生成（可选 API）</div>
         </div>
       </aside>
 
