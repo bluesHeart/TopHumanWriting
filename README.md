@@ -31,11 +31,12 @@ If it stays on the startup page, open `TopHumanWriting_data/logs/launch.log` (or
 2. Run `run_web.bat`
 
 Main pages:
+- **Start**: a Metaso-style home (paste text → choose mode → run)
 - **Library**: create library → select PDF folder → **import to local** → build index
 - **Align Scan**: find least-aligned sentences (retrieval only, no LLM)
 - **Align Polish**: show exemplars (C1..Ck) → generate white-box polish (Qwen via llama.cpp)
   - Shows scaffold chips + optional diff highlighting
-- **Citations**: build/search citation sentence patterns + open PDFs + view References
+- **Citations**: build/search citation sentence patterns + open PDFs + view references
 - **Local LLM**: one-click start & test (Preset: 8GB)
 
 ### Offline LLM Assets
@@ -107,11 +108,12 @@ TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范
 2. 运行 `run_web.bat`
 
 主要页面：
+- **开始**：Metaso 风格首页（粘贴文本 → 选模式 → 一键扫描/润色/引用）
 - **文献库**：建库 → 选 PDF 文件夹 → 导入到本地库 → 建索引（不弹 PowerShell）
 - **对齐扫描**：找出最不像范文的句子（仅检索，不调用 LLM）
 - **对齐润色**：展示范文证据（C1..Ck）→ 生成白箱润色（Qwen + llama.cpp）
   - Scaffold 句式骨架（点一下复制；Shift+点一下插入）+ 改写差异对照
-- **引用借鉴**：抽取/检索引用句式库 + 打开原 PDF + 查看 References
+- **引用借鉴**：抽取/检索引用句式库 + 打开原 PDF + 查看参考文献
 - **本地 LLM**：一键启动&测试（推荐 8GB 预设）
 
 ### 本地 LLM 资产
