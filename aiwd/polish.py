@@ -127,12 +127,24 @@ def extract_json(text: str) -> Optional[dict]:
     s = text.strip()
     if not s:
         return None
-    # Best-effort: find first JSON object.
-    m = re.search(r"\{.*\}", s, flags=re.DOTALL)
-    if not m:
+    # Remove common Markdown fences.
+    s = re.sub(r"^\s*```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*```\s*$", "", s, flags=re.IGNORECASE)
+
+    # Find the first object start.
+    start = s.find("{")
+    if start < 0:
         return None
+    s2 = s[start:]
+
+    # Many providers occasionally emit raw newlines inside JSON strings. Replace with spaces
+    # before parsing so the JSON becomes parseable while keeping substring constraints sane.
+    s2 = s2.replace("\r", "\n").replace("\n", " ")
+
+    dec = json.JSONDecoder()
     try:
-        return json.loads(m.group(0))
+        obj, _end = dec.raw_decode(s2)
+        return obj if isinstance(obj, dict) else None
     except Exception:
         return None
 

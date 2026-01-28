@@ -40,9 +40,10 @@ body {
   margin: 0;
   font-family: var(--font-ui);
   color: var(--text-primary);
-  background: var(--bg-primary);
+  background: radial-gradient(900px 420px at 18% 18%, rgba(20, 184, 166, 0.1), transparent 60%),
+    radial-gradient(820px 420px at 84% 18%, rgba(47, 128, 237, 0.09), transparent 58%), var(--bg-primary);
   font-size: 15px;
-  line-height: 1.65;
+  line-height: 1.72;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -200,7 +201,7 @@ body {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 20px 20px;
+  padding: 22px 22px;
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.04);
 }
 
@@ -225,7 +226,7 @@ body {
 .row {
   display: flex;
   column-gap: 14px;
-  row-gap: 12px;
+  row-gap: 14px;
   align-items: center;
   flex-wrap: wrap;
 }
@@ -481,8 +482,8 @@ body {
 }
 
 .modal {
-  width: min(980px, 100%);
-  max-height: min(82vh, 820px);
+  width: min(860px, 100%);
+  max-height: min(84vh, 860px);
   overflow: hidden;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -516,6 +517,69 @@ body {
   margin: 12px 0;
   color: var(--text-secondary);
   line-height: 1.7;
+}
+
+.mark {
+  background: rgba(20, 184, 166, 0.18);
+  border: 1px solid rgba(20, 184, 166, 0.22);
+  border-radius: 8px;
+  padding: 0 4px;
+  color: var(--text-primary);
+}
+
+.diff-wrap {
+  margin-top: 12px;
+}
+
+.diff-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 980px) {
+  .diff-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.diff-panel {
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  border-radius: 12px;
+  padding: 12px 12px;
+}
+
+.diff-text {
+  white-space: pre-wrap;
+  line-height: 1.85;
+  color: var(--text-primary);
+}
+
+.diff-text ins,
+.diff-text del {
+  border-radius: 8px;
+  padding: 0 3px;
+}
+
+.diff-text ins {
+  background: rgba(20, 184, 166, 0.18);
+  text-decoration: none;
+}
+
+.diff-text del {
+  background: rgba(220, 38, 38, 0.14);
+  text-decoration: line-through;
+}
+
+.chip.scaffold {
+  border-color: rgba(20, 184, 166, 0.45);
+  background: rgba(20, 184, 166, 0.1);
+  color: var(--text-primary);
+}
+
+.chip.scaffold:hover {
+  background: rgba(20, 184, 166, 0.14);
 }
 
 .hidden {

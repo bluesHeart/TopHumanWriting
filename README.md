@@ -11,6 +11,7 @@ TopHumanWriting is an **offline local web app** for “aligning to top human exe
 - Build a local **PDF exemplar library** (50–100 PDFs, zh/en/mixed)
 - Retrieve top-k exemplar excerpts with **PDF + page** (FAISS, local)
 - Generate **white-box** polish: diagnosis + controlled rewrites + evidence quotes (Qwen 3B via llama.cpp)
+  - Scaffold chips (click to copy, Shift+click to insert) + rewrite diff view
 - Build a **citation pattern bank**: in-text citation sentences + references (white-box, searchable)
 
 ### Quick Start (Web)
@@ -33,6 +34,7 @@ Main pages:
 - **Library**: create library → select PDF folder → **import to local** → build index
 - **Align Scan**: find least-aligned sentences (retrieval only, no LLM)
 - **Align Polish**: show exemplars (C1..Ck) → generate white-box polish (Qwen via llama.cpp)
+  - Shows scaffold chips + optional diff highlighting
 - **Citations**: build/search citation sentence patterns + open PDFs + view References
 - **Local LLM**: one-click start & test (Preset: 8GB)
 
@@ -52,6 +54,7 @@ If you want to use a remote LLM (instead of local llama.cpp), configure it in **
 - `SKILL_LLM_MODEL` (or `OPENAI_MODEL`)
 
 Note: some “reasoning-heavy” API models may need a larger `max_tokens` (e.g. **4096+**) to avoid truncated JSON.
+TopHumanWriting defaults API polish output length to **4096** (and auto-increases if too small).
 
 ### Data & Cache Location (Portable)
 
@@ -107,6 +110,7 @@ TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范
 - **文献库**：建库 → 选 PDF 文件夹 → 导入到本地库 → 建索引（不弹 PowerShell）
 - **对齐扫描**：找出最不像范文的句子（仅检索，不调用 LLM）
 - **对齐润色**：展示范文证据（C1..Ck）→ 生成白箱润色（Qwen + llama.cpp）
+  - Scaffold 句式骨架（点一下复制；Shift+点一下插入）+ 改写差异对照
 - **引用借鉴**：抽取/检索引用句式库 + 打开原 PDF + 查看 References
 - **本地 LLM**：一键启动&测试（推荐 8GB 预设）
 
@@ -126,6 +130,7 @@ TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范
 - `SKILL_LLM_MODEL`（或 `OPENAI_MODEL`）
 
 提示：某些“强推理”模型可能需要更大的输出长度（例如 **4096+**）才能避免 JSON 被截断。
+TopHumanWriting 默认会把 API 润色输出长度设为 **4096**（过小会自动调大）。
 
 ### 数据与缓存位置（便于清理）
 

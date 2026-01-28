@@ -456,6 +456,203 @@
     }
   }
 
+  function extractScaffolds(text) {
+    const s = String(text || "");
+    const out = [];
+    const re = /scaffold\s*:\s*["“]([^"”]{1,120})["”]/gi;
+    let m = null;
+    while ((m = re.exec(s))) {
+      const p = String(m[1] || "").trim();
+      if (p && !out.includes(p)) out.push(p);
+      if (out.length >= 3) break;
+    }
+    return out;
+  }
+
+  function stripScaffoldPrefix(text) {
+    const s = String(text || "").trim();
+    const re = /^\s*scaffold\s*:\s*["“][^"”]{1,120}["”]\s*/i;
+    return s.replace(re, "").trim();
+  }
+
+  function highlightNeedle(text, needle) {
+    const s = String(text || "");
+    const n = String(needle || "").trim();
+    if (!s || !n) return document.createTextNode(s);
+    let i = s.indexOf(n);
+    if (i < 0) return document.createTextNode(s);
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    while (i >= 0) {
+      frag.appendChild(document.createTextNode(s.slice(pos, i)));
+      frag.appendChild(el("mark", { class: "mark" }, n));
+      pos = i + n.length;
+      i = s.indexOf(n, pos);
+    }
+    frag.appendChild(document.createTextNode(s.slice(pos)));
+    return frag;
+  }
+
+  function highlightNeedles(text, needles) {
+    const s = String(text || "");
+    const arr = Array.isArray(needles) ? needles.map((x) => String(x || "").trim()).filter(Boolean) : [];
+    if (!s || !arr.length) return document.createTextNode(s);
+    const uniq = [];
+    for (const x of arr) if (x && !uniq.includes(x)) uniq.push(x);
+    if (!uniq.length) return document.createTextNode(s);
+
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    while (pos < s.length) {
+      let bestIdx = -1;
+      let bestNeedle = "";
+      for (const n of uniq) {
+        const i = s.indexOf(n, pos);
+        if (i < 0) continue;
+        if (bestIdx < 0 || i < bestIdx || (i === bestIdx && n.length > bestNeedle.length)) {
+          bestIdx = i;
+          bestNeedle = n;
+        }
+      }
+      if (bestIdx < 0) break;
+      if (bestIdx > pos) frag.appendChild(document.createTextNode(s.slice(pos, bestIdx)));
+      frag.appendChild(el("mark", { class: "mark" }, bestNeedle));
+      pos = bestIdx + bestNeedle.length;
+    }
+    if (pos < s.length) frag.appendChild(document.createTextNode(s.slice(pos)));
+    return frag;
+  }
+
+  function tokenizeForDiff(text) {
+    const s = String(text || "");
+    if (!s) return [];
+    try {
+      if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+        const seg = new Intl.Segmenter(undefined, { granularity: "word" });
+        const parts = [];
+        for (const it of seg.segment(s)) parts.push(it.segment);
+        if (parts.join("") === s) return parts;
+      }
+    } catch {}
+
+    // Fallback: keep spaces, group ascii words, keep CJK chars.
+    const out = [];
+    let i = 0;
+    while (i < s.length) {
+      const ch = s[i];
+      if (/\s/.test(ch)) {
+        let j = i + 1;
+        while (j < s.length && /\s/.test(s[j])) j++;
+        out.push(s.slice(i, j));
+        i = j;
+        continue;
+      }
+      if (/[A-Za-z0-9_]/.test(ch)) {
+        let j = i + 1;
+        while (j < s.length && /[A-Za-z0-9_]/.test(s[j])) j++;
+        out.push(s.slice(i, j));
+        i = j;
+        continue;
+      }
+      out.push(ch);
+      i++;
+    }
+    return out;
+  }
+
+  function diffTokens(aTokens, bTokens) {
+    const a = Array.isArray(aTokens) ? aTokens : [];
+    const b = Array.isArray(bTokens) ? bTokens : [];
+    const n = a.length;
+    const m = b.length;
+    if (!n && !m) return [];
+    // Guard: avoid heavy DP for very long inputs.
+    if (n * m > 650000) return null;
+
+    const cols = m + 1;
+    const dp = new Uint16Array((n + 1) * (m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      const row = i * cols;
+      const rowDown = (i + 1) * cols;
+      for (let j = m - 1; j >= 0; j--) {
+        const idx = row + j;
+        if (a[i] === b[j]) {
+          dp[idx] = dp[rowDown + j + 1] + 1;
+        } else {
+          const down = dp[rowDown + j];
+          const right = dp[row + j + 1];
+          dp[idx] = down >= right ? down : right;
+        }
+      }
+    }
+
+    const ops = [];
+    let i = 0;
+    let j = 0;
+    while (i < n && j < m) {
+      if (a[i] === b[j]) {
+        ops.push({ t: "eq", v: a[i] });
+        i++;
+        j++;
+        continue;
+      }
+      const down = dp[(i + 1) * cols + j];
+      const right = dp[i * cols + (j + 1)];
+      if (down >= right) {
+        ops.push({ t: "del", v: a[i] });
+        i++;
+      } else {
+        ops.push({ t: "ins", v: b[j] });
+        j++;
+      }
+    }
+    while (i < n) {
+      ops.push({ t: "del", v: a[i++] });
+    }
+    while (j < m) {
+      ops.push({ t: "ins", v: b[j++] });
+    }
+
+    // Merge adjacent ops for rendering.
+    const merged = [];
+    for (const op of ops) {
+      const last = merged.length ? merged[merged.length - 1] : null;
+      if (last && last.t === op.t) last.v += op.v;
+      else merged.push({ t: op.t, v: op.v });
+    }
+    return merged;
+  }
+
+  function renderDiffView(originalText, revisedText) {
+    const a = String(originalText || "");
+    const b = String(revisedText || "");
+    if (!a && !b) return el("div", { class: "muted" }, "空文本。");
+
+    const ops = diffTokens(tokenizeForDiff(a), tokenizeForDiff(b));
+    if (ops == null) return el("div", { class: "muted" }, "文本较长：已隐藏差异高亮（仍可直接复制/替换）。");
+
+    const left = document.createDocumentFragment();
+    const right = document.createDocumentFragment();
+    for (const op of ops) {
+      if (!op || !op.t) continue;
+      if (op.t === "eq") {
+        left.appendChild(document.createTextNode(op.v));
+        right.appendChild(document.createTextNode(op.v));
+      } else if (op.t === "del") {
+        left.appendChild(el("del", { class: "del" }, op.v));
+      } else if (op.t === "ins") {
+        right.appendChild(el("ins", { class: "ins" }, op.v));
+      }
+    }
+
+    return el(
+      "div",
+      { class: "diff-grid" },
+      el("div", { class: "diff-panel" }, el("div", { class: "muted" }, "原文"), el("div", { class: "diff-text" }, left)),
+      el("div", { class: "diff-panel" }, el("div", { class: "muted" }, "改写"), el("div", { class: "diff-text" }, right))
+    );
+  }
+
   function exemplarList(exemplars, opts = {}) {
     const { library } = opts;
     const list = el("div", { class: "list" });
@@ -980,7 +1177,7 @@
     root.appendChild(
       el(
         "div",
-        { class: "grid two", style: "gap:14px; align-items:start; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr)" },
+        { class: "grid two", style: "gap:18px; align-items:start; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr)" },
         inputCard,
         resultsBox
       )
@@ -999,8 +1196,44 @@
       localStorage.setItem("aiw.polishDraft", state.polishDraft);
     });
 
+    function insertAtCursor(textarea, text) {
+      const ta = textarea;
+      const ins = String(text || "");
+      if (!ta || !ins) return;
+      let start = 0;
+      let end = 0;
+      try {
+        start = Number(ta.selectionStart || 0);
+        end = Number(ta.selectionEnd || 0);
+      } catch {
+        start = end = ta.value.length;
+      }
+      const before = ta.value.slice(0, start);
+      const after = ta.value.slice(end);
+      const isCjk = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(ins);
+      const needSpaceLeft = !isCjk && before && !/[\s\n]$/.test(before);
+      const needSpaceRight = !isCjk && after && !/^[\s\n]/.test(after);
+      const mid = (needSpaceLeft ? " " : "") + ins + (needSpaceRight ? " " : "");
+      ta.value = before + mid + after;
+      const pos = (before + (needSpaceLeft ? " " : "") + ins).length;
+      try {
+        ta.selectionStart = ta.selectionEnd = pos;
+        ta.focus();
+      } catch {}
+      try {
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+      } catch {}
+    }
+
     const topk = el("input", { class: "input", value: "8", style: "width:110px", inputmode: "numeric", title: "检索多少条范文片段作为证据（C1..Ck）" });
-    const maxTok = el("input", { class: "input", value: "650", style: "width:120px", inputmode: "numeric", title: "输出长度上限（越大越慢）" });
+    const storedMaxTok = Number(localStorage.getItem("aiw.polishMaxTokens") || "");
+    const providerDefault = localStorage.getItem("aiw.llmProvider") || "local";
+    const maxTokDefault = Number.isFinite(storedMaxTok) && storedMaxTok > 0 ? storedMaxTok : providerDefault === "api" ? 4096 : 650;
+    const maxTok = el("input", { class: "input", value: String(Math.round(maxTokDefault)), style: "width:120px", inputmode: "numeric", title: "输出长度上限（越大越慢）" });
+    maxTok.addEventListener("change", () => {
+      const v = Number((maxTok.value || "").trim() || 0);
+      if (Number.isFinite(v) && v > 0) localStorage.setItem("aiw.polishMaxTokens", String(Math.round(v)));
+    });
 
     const providerSel = el(
       "select",
@@ -1012,6 +1245,14 @@
     providerSel.addEventListener("change", () => {
       localStorage.setItem("aiw.llmProvider", providerSel.value || "local");
       refreshLLMStatus().catch(() => {});
+      if ((providerSel.value || "") === "api") {
+        const cur = Number((maxTok.value || "").trim() || 0);
+        if (!Number.isFinite(cur) || cur < 2048) {
+          maxTok.value = "4096";
+          localStorage.setItem("aiw.polishMaxTokens", "4096");
+          toast("已切换到 API：默认输出长度已调大（4096）。");
+        }
+      }
     });
 
     let advOpen = localStorage.getItem("aiw.polishAdv") === "1";
@@ -1027,6 +1268,12 @@
 
     const exemplarsBox = el("div", { class: "card" });
     const outBox = el("div", { class: "card" });
+
+    function renderExemplars(exs, title = "范文对照（将被引用为 C1..Ck）") {
+      clear(exemplarsBox);
+      exemplarsBox.appendChild(el("div", { class: "label" }, title));
+      exemplarsBox.appendChild(exemplarList(exs || [], { library: state.library }));
+    }
 
     function renderExemplarsEmpty() {
       clear(exemplarsBox);
@@ -1062,6 +1309,43 @@
       outBox.appendChild(el("div", { class: "muted" }, "建议流程：先点“获取范文对照”确认证据 → 再点“生成对齐润色”。"));
     }
 
+    function renderOutGenerating(provider) {
+      clear(outBox);
+      const p = String(provider || "").toLowerCase();
+      const title = p === "api" ? "生成中…（API 请求中）" : "生成中…（首次会加载模型）";
+      outBox.appendChild(el("div", { class: "label" }, title));
+      outBox.appendChild(el("div", { class: "muted" }, "请稍等：会输出“诊断 + 轻改/中改”，并附范文证据。"));
+      outBox.appendChild(el("div", { class: "progress" }, el("div", { style: "width:70%" })));
+      outBox.appendChild(el("div", { class: "muted" }, "如果长时间无响应：可尝试调大输出长度（API 建议 ≥ 4096）。"));
+    }
+
+    function renderOutError(msg) {
+      clear(outBox);
+      outBox.appendChild(el("div", { class: "label" }, "生成失败"));
+      outBox.appendChild(el("div", { class: "quote" }, msg || "未知错误。"));
+      outBox.appendChild(
+        el(
+          "div",
+          { class: "row" },
+          el(
+            "button",
+            {
+              class: "btn btn-primary",
+              type: "button",
+              onclick: () => {
+                advOpen = true;
+                localStorage.setItem("aiw.polishAdv", "1");
+                advRow.style.display = "flex";
+                toast("已展开高级设置（可调输出长度）。");
+              },
+            },
+            "打开高级设置"
+          ),
+          el("button", { class: "btn", type: "button", onclick: () => setRoute("llm") }, "去 LLM 设置")
+        )
+      );
+    }
+
     renderExemplarsEmpty();
     renderOutEmpty();
 
@@ -1081,9 +1365,7 @@
           top_k: Number(topk.value || 8),
           generate: false,
         });
-        clear(exemplarsBox);
-        exemplarsBox.appendChild(el("div", { class: "label" }, "范文对照（将被引用为 C1..Ck）"));
-        exemplarsBox.appendChild(exemplarList(r.exemplars || [], { library: state.library }));
+        renderExemplars(r.exemplars || []);
         toast("已获取范文对照。");
         return r;
       } catch (e) {
@@ -1100,6 +1382,8 @@
         outBox.appendChild(el("div", { class: "muted" }, "未生成结果。"));
         return;
       }
+
+      const baseText = String((r && r.selected_text) || "").trim();
 
       const diag = result.diagnosis || [];
       const vars = result.variants || [];
@@ -1179,20 +1463,56 @@
         const list = el("div", { class: "list" });
         for (const d of diag) {
           const ev = d.evidence || [];
+          const scaffolds = extractScaffolds(d.suggestion || "");
+          const rest = stripScaffoldPrefix(d.suggestion || "");
           const evNodes = ev.map((c) =>
             el(
               "div",
               { class: "quote" },
               el("div", { class: "muted mono" }, `${c.id || ""} · ${c.pdf || ""}#p${c.page || 0}`),
-              el("div", null, c.quote || "")
+              el("div", null, scaffolds.length ? highlightNeedles(c.quote || "", scaffolds) : String(c.quote || ""))
             )
           );
+          const scaffoldRow =
+            scaffolds && scaffolds.length
+              ? el(
+                  "div",
+                  { class: "row", style: "gap:8px; margin-top:8px" },
+                  el("span", { class: "muted" }, "Scaffold"),
+                  ...scaffolds.map((p) =>
+                    el(
+                      "button",
+                      {
+                        class: "chip scaffold",
+                        type: "button",
+                        title: "点击复制；Shift+点击插入到输入框",
+                        onclick: (e) => {
+                          const ev2 = e || window.event;
+                          if (ev2 && ev2.shiftKey) {
+                            insertAtCursor(selected, p);
+                            toast("已插入 scaffold。");
+                            return;
+                          }
+                          copyText(p);
+                        },
+                      },
+                      p
+                    )
+                  )
+                )
+              : null;
           list.appendChild(
             el(
               "div",
               { class: "item" },
               el("div", { class: "item-header" }, el("div", null, el("span", { class: "badge mono" }, d.title || "Diagnosis"))),
-              el("div", null, el("div", { class: "muted" }, d.problem || ""), el("div", null, d.suggestion || "")),
+              el(
+                "div",
+                null,
+                el("div", { class: "muted" }, d.problem || ""),
+                scaffoldRow,
+                rest ? el("div", null, rest) : d.suggestion ? el("div", null, d.suggestion || "") : null
+              ),
               ...evNodes
             )
           );
@@ -1208,6 +1528,38 @@
         const rewrite = String(v.rewrite || "");
         const changes = v.changes || [];
         const cits = v.citations || [];
+        const allScaffolds = [];
+        for (const d of diag || []) {
+          for (const p of extractScaffolds(d && d.suggestion ? d.suggestion : "")) allScaffolds.push(p);
+        }
+        const usedScaffolds = [];
+        for (const p of allScaffolds) {
+          if (!p) continue;
+          if (rewrite.includes(p) && !usedScaffolds.includes(p)) usedScaffolds.push(p);
+          if (usedScaffolds.length >= 4) break;
+        }
+
+        let diffBuilt = false;
+        const diffWrap = el("div", { class: "diff-wrap hidden" });
+        const diffBtn = el(
+          "button",
+          {
+            class: "btn btn-small",
+            type: "button",
+            onclick: () => {
+              const hidden = diffWrap.classList.contains("hidden");
+              if (hidden && !diffBuilt) {
+                clear(diffWrap);
+                diffWrap.appendChild(renderDiffView(baseText || String(selected.value || ""), rewrite));
+                diffBuilt = true;
+              }
+              diffWrap.classList.toggle("hidden");
+              diffBtn.textContent = diffWrap.classList.contains("hidden") ? "显示差异" : "隐藏差异";
+            },
+          },
+          "显示差异"
+        );
+
         return el(
           "div",
           { class: "card" },
@@ -1216,16 +1568,49 @@
             { class: "item-header" },
             el("div", { class: "label" }, title),
             el(
-              "button",
-              {
-                class: "btn btn-small",
-                type: "button",
-                onclick: () => copyText(rewrite),
-              },
-              "复制"
+              "div",
+              { class: "row", style: "justify-content:flex-end" },
+              diffBtn,
+              el(
+                "button",
+                {
+                  class: "btn btn-small",
+                  type: "button",
+                  onclick: () => copyText(rewrite),
+                },
+                "复制"
+              )
             )
           ),
-          el("div", { class: "quote" }, rewrite),
+          el("div", { class: "quote" }, usedScaffolds.length ? highlightNeedles(rewrite, usedScaffolds) : rewrite),
+          usedScaffolds.length
+            ? el(
+                "div",
+                { class: "row", style: "gap:8px; margin-top:10px" },
+                el("span", { class: "muted" }, "本改写用到"),
+                ...usedScaffolds.map((p) =>
+                  el(
+                    "button",
+                    {
+                      class: "chip scaffold",
+                      type: "button",
+                      title: "点击复制；Shift+点击插入到输入框",
+                      onclick: (e) => {
+                        const ev2 = e || window.event;
+                        if (ev2 && ev2.shiftKey) {
+                          insertAtCursor(selected, p);
+                          toast("已插入 scaffold。");
+                          return;
+                        }
+                        copyText(p);
+                      },
+                    },
+                    p
+                  )
+                )
+              )
+            : null,
+          diffWrap,
           changes && changes.length ? el("div", null, el("div", { class: "label" }, "变更点"), el("ul", null, ...changes.map((x) => el("li", null, x)))) : null,
           cits && cits.length
             ? el(
@@ -1289,15 +1674,22 @@
           if (maxTokens < 256) {
             maxTokens = 256;
             maxTok.value = String(maxTokens);
+            localStorage.setItem("aiw.polishMaxTokens", String(maxTokens));
           }
           if (provider === "api") {
-            if (maxTokens < 1200) toast("API 模型可能需要更大输出长度（建议 ≥ 4096）以避免 JSON 被截断。", "bad", 4500);
+            if (maxTokens < 2048) {
+              maxTokens = Math.min(cap, 4096);
+              maxTok.value = String(maxTokens);
+              localStorage.setItem("aiw.polishMaxTokens", String(maxTokens));
+              toast("API 输出长度已自动调大（4096）以避免 JSON 截断。");
+            }
           } else {
             if (maxTokens < 450) toast("输出长度太小可能导致生成失败（JSON 被截断）。建议 ≥ 650。", "bad", 4500);
           }
 
           genBtn.disabled = true;
           genBtn.textContent = provider === "api" ? "生成中…（API 请求中）" : "生成中…（首次会加载模型）";
+          renderOutGenerating(provider);
           try {
             await refreshLLMStatus();
             const r = await apiPost("/api/align/polish", {
@@ -1311,6 +1703,7 @@
               retries: 2,
             });
             await refreshLLMStatus();
+            if (r && r.exemplars) renderExemplars(r.exemplars || [], "本次生成使用的范文对照（C1..Ck）");
             renderPolishResult(r);
             toast("生成完成。");
           } catch (e) {
@@ -1336,7 +1729,10 @@
             } else if (msg.includes("api request failed") && msg.includes("http 429")) {
               msg = "API 触发限流（429）：请稍后重试，或降低频率/更换模型。";
             }
-            if (msg) toast(msg, "bad", 6500);
+            if (msg) {
+              toast(msg, "bad", 6500);
+              renderOutError(msg);
+            }
           } finally {
             genBtn.disabled = false;
             genBtn.textContent = "生成对齐润色";
@@ -1381,7 +1777,7 @@
 
     const topGrid = el(
       "div",
-      { class: "grid two", style: "gap:14px; align-items:start; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr)" },
+      { class: "grid two", style: "gap:18px; align-items:start; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr)" },
       inputCard,
       exemplarsBox
     );
