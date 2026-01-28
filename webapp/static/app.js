@@ -16,6 +16,7 @@
     lastScan: null,
     lastCite: null,
     llm: null,
+    llmApi: null,
     buildTaskId: null,
     buildPollTimer: null,
     citeTaskId: null,
@@ -368,7 +369,34 @@
   async function refreshLLMStatus() {
     const st = await apiGet("/api/llm/status");
     state.llm = st;
+
+    try {
+      state.llmApi = await apiGet("/api/llm/api/status");
+    } catch {
+      state.llmApi = null;
+    }
+
     const badge = $("#llmBadge");
+    const provider = localStorage.getItem("aiw.llmProvider") || "local";
+
+    if (provider === "api" && state.llmApi) {
+      const api = state.llmApi || {};
+      const hasKey = !!api.api_key_present;
+      const hasUrl = !!String(api.base_url || "").trim();
+      const hasModel = !!String(api.model || "").trim();
+
+      let text = "LLM: API ";
+      if (!hasKey) text += "缺少 Key";
+      else if (!hasUrl) text += "缺少 URL";
+      else if (!hasModel) text += "缺少模型";
+      else text += "已配置";
+
+      badge.textContent = text;
+      badge.classList.remove("ok", "warn", "bad");
+      badge.classList.add(hasKey && hasUrl && hasModel ? "ok" : "bad");
+      return;
+    }
+
     const modelOk = !!st.model_ok;
     const serverOk = !!st.server_ok;
     const running = !!st.running;
@@ -707,7 +735,7 @@
   }
 
   function pagePolish() {
-    renderHeader("对齐润色", "白箱：范文对照 + 证据引用 + 受控改写（Qwen 3B）。");
+    renderHeader("对齐润色", "白箱：范文对照 + 证据引用 + 受控改写（默认本地 Qwen，可切换 API）。");
     const root = el("div", { class: "grid", style: "gap:14px" });
 
     const selected = el("textarea", { class: "textarea", placeholder: "选中要润色的句子/段落…" });
@@ -720,13 +748,27 @@
     const topk = el("input", { class: "input", value: "8", style: "width:110px", inputmode: "numeric", title: "检索多少条范文片段作为证据（C1..Ck）" });
     const maxTok = el("input", { class: "input", value: "900", style: "width:120px", inputmode: "numeric", title: "输出长度上限（越大越慢）" });
 
+    const providerSel = el(
+      "select",
+      { class: "select", style: "width:220px" },
+      el("option", { value: "local" }, "本地 Qwen（llama.cpp）"),
+      el("option", { value: "api" }, "大模型 API（OpenAI兼容）")
+    );
+    providerSel.value = localStorage.getItem("aiw.llmProvider") || "local";
+    providerSel.addEventListener("change", () => {
+      localStorage.setItem("aiw.llmProvider", providerSel.value || "local");
+      refreshLLMStatus().catch(() => {});
+    });
+
     let advOpen = localStorage.getItem("aiw.polishAdv") === "1";
     const advRow = el(
       "div",
       { class: "row", style: `display:${advOpen ? "flex" : "none"}` },
+      el("span", { class: "label" }, "LLM"),
+      providerSel,
       el("span", { class: "label" }, "输出长度"),
       maxTok,
-      el("span", { class: "muted" }, "温度固定 0（尽量不发散）。")
+      el("span", { class: "muted" }, "温度固定 0（尽量不发散）。API 需先在“LLM 设置”配置。")
     );
 
     const exemplarsBox = el("div", { class: "card" }, el("div", { class: "muted" }, "先获取范文对照。"));
@@ -769,7 +811,13 @@
         el("div", { class: "label" }, `输出语言：${result.language || "mixed"} · 诊断 ${diag.length} 条 · 改写 ${vars.length} 条`)
       );
 
-      if (state.llm && state.llm.model_path) {
+      const llmInfo = (r && r.llm) || null;
+      if (llmInfo && llmInfo.provider === "api") {
+        outBox.appendChild(el("div", { class: "muted" }, `LLM：API · ${llmInfo.model || "—"} · ${llmInfo.base_url || "—"}`));
+      } else if (llmInfo && llmInfo.provider === "local") {
+        const mp = String(llmInfo.model_path || "");
+        outBox.appendChild(el("div", { class: "muted" }, `LLM：${mp ? mp.split(/[\\\\/]/).pop() : "—"}（llama.cpp）`));
+      } else if (state.llm && state.llm.model_path) {
         outBox.appendChild(el("div", { class: "muted" }, `LLM：${String(state.llm.model_path).split(/[\\\\/]/).pop()}（llama.cpp）`));
       }
 
@@ -888,14 +936,17 @@
           }
 
           genBtn.disabled = true;
-          genBtn.textContent = "生成中…（首次会加载模型）";
+          const provider = providerSel.value || localStorage.getItem("aiw.llmProvider") || "local";
+          genBtn.textContent = provider === "api" ? "生成中…（API 请求中）" : "生成中…（首次会加载模型）";
           try {
             await refreshLLMStatus();
+            const provider = providerSel.value || localStorage.getItem("aiw.llmProvider") || "local";
             const r = await apiPost("/api/align/polish", {
               library: state.library,
               selected_text: txt,
               top_k: Number(topk.value || 8),
               generate: true,
+              provider,
               temperature: 0.0,
               max_tokens: maxTokens,
               retries: 2,
@@ -909,16 +960,28 @@
             if (msg.includes("LLM output invalid") && msg.includes("bad json")) {
               msg = "生成结果格式不完整（常见原因：输出长度太小）。请打开“高级设置”，把输出长度调大（建议 900）后重试。";
             } else if (msg.includes("failed to start llama-server")) {
-              msg = "启动本地模型失败：请到“本地 LLM”页点击“一键启动&测试”。";
+              msg = "启动本地模型失败：请到“LLM 设置”页点击“一键启动&测试”。";
+            } else if (msg.includes("missing api key")) {
+              msg = "未配置大模型 API：请到“LLM 设置”页填写/测试，或设置环境变量 SKILL_LLM_API_KEY / OPENAI_API_KEY。";
+            } else if (msg.includes("missing base_url")) {
+              msg = "未配置 API URL：请到“LLM 设置”页填写 base_url（通常以 /v1 结尾），或设置 SKILL_LLM_BASE_URL / OPENAI_BASE_URL。";
+            } else if (msg.includes("missing model")) {
+              msg = "未配置 API 模型名：请到“LLM 设置”页填写 model，或设置 SKILL_LLM_MODEL / OPENAI_MODEL。";
+            } else if (msg.includes("api request failed") && msg.includes("http 401")) {
+              msg = "API 鉴权失败（401）：请检查 api_key 是否正确，或到“LLM 设置”页先点“测试 API”。";
+            } else if (msg.includes("api request failed") && msg.includes("http 403")) {
+              msg = "API 拒绝访问（403）：可能是 key/权限不足、白名单限制或网关不支持 /v1/chat/completions。请到“LLM 设置”页先点“测试 API”。";
+            } else if (msg.includes("api request failed") && msg.includes("http 429")) {
+              msg = "API 触发限流（429）：请稍后重试，或降低频率/更换模型。";
             }
             toast(msg, "bad", 6500);
           } finally {
             genBtn.disabled = false;
-            genBtn.textContent = "生成对齐润色（Qwen）";
+            genBtn.textContent = "生成对齐润色";
           }
         },
       },
-      "生成对齐润色（Qwen）"
+      "生成对齐润色"
     );
 
     const advBtn = el(
@@ -1256,9 +1319,32 @@
   }
 
   function pageLLM() {
-    renderHeader("本地 LLM", "llama.cpp（llama-server.exe）+ GGUF（默认 Qwen 2.5 3B）。");
+    renderHeader("LLM 设置", "支持：本地 llama.cpp（离线） / OpenAI-compatible API（可选）。");
     const root = el("div", { class: "grid", style: "gap:14px" });
 
+    const providerSel = el(
+      "select",
+      { class: "select", style: "width:220px" },
+      el("option", { value: "local" }, "默认用本地 Qwen（离线）"),
+      el("option", { value: "api" }, "默认用大模型 API")
+    );
+    providerSel.value = localStorage.getItem("aiw.llmProvider") || "local";
+    providerSel.addEventListener("change", () => {
+      localStorage.setItem("aiw.llmProvider", providerSel.value || "local");
+      refreshLLMStatus().catch(() => {});
+      toast("已更新润色默认 LLM。");
+    });
+
+    root.appendChild(
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "label" }, "润色默认使用"),
+        el("div", { class: "row" }, providerSel, el("span", { class: "muted" }, "也可在“对齐润色 → 高级设置”临时切换。"))
+      )
+    );
+
+    // Local llama.cpp (offline)
     const serverPath = el("input", { class: "input", style: "flex:1", placeholder: "llama-server.exe 路径" });
     const modelPath = el("input", { class: "input", style: "flex:1", placeholder: "GGUF 模型路径（例如 qwen2.5-3b…gguf）" });
     const ctx = el("input", { class: "input", style: "width:100px", value: "2048", inputmode: "numeric" });
@@ -1266,14 +1352,14 @@
     const ngl = el("input", { class: "input", style: "width:110px", value: "0", inputmode: "numeric" });
     const sleep = el("input", { class: "input", style: "width:130px", value: "300", inputmode: "numeric" });
 
-    const statusBox = el("div", { class: "card" }, el("div", { class: "muted" }, "正在读取状态…"));
+    const localStatusBox = el("div", { class: "card" }, el("div", { class: "muted" }, "正在读取本地 LLM 状态…"));
 
-    async function syncFromStatus() {
+    async function syncLocalFromStatus() {
       await refreshLLMStatus();
       const st = state.llm || {};
       serverPath.value = st.server_path || "";
       modelPath.value = st.model_path || "";
-      clear(statusBox);
+      clear(localStatusBox);
       const rows = [
         ["server_path", st.server_path || ""],
         ["model_path", st.model_path || ""],
@@ -1282,8 +1368,8 @@
         ["running", String(!!st.running)],
         ["base_url", st.base_url || ""],
       ];
-      statusBox.appendChild(el("div", { class: "label" }, "状态"));
-      statusBox.appendChild(
+      localStatusBox.appendChild(el("div", { class: "label" }, "本地 llama.cpp 状态"));
+      localStatusBox.appendChild(
         el(
           "div",
           { class: "list" },
@@ -1314,14 +1400,14 @@
       "8GB 预设"
     );
 
-    const testBtn = el(
+    const localTestBtn = el(
       "button",
       {
         class: "btn btn-primary",
         type: "button",
         onclick: async () => {
-          testBtn.disabled = true;
-          testBtn.textContent = "启动&测试中…";
+          localTestBtn.disabled = true;
+          localTestBtn.textContent = "启动&测试中…";
           try {
             const r = await apiPost("/api/llm/test", {
               server_path: (serverPath.value || "").trim(),
@@ -1331,21 +1417,21 @@
               n_gpu_layers: Number(ngl.value || 0),
               sleep_idle_seconds: Number(sleep.value || 300),
             });
-            await syncFromStatus();
-            toast(r.ok ? "LLM 测试通过。" : "LLM 测试失败。", r.ok ? "good" : "bad");
+            await syncLocalFromStatus();
+            toast(r.ok ? "本地 LLM 测试通过。" : "本地 LLM 测试失败。", r.ok ? "good" : "bad");
           } catch (e) {
-            await syncFromStatus().catch(() => {});
+            await syncLocalFromStatus().catch(() => {});
             toast(String(e.message || e), "bad", 6500);
           } finally {
-            testBtn.disabled = false;
-            testBtn.textContent = "一键启动&测试";
+            localTestBtn.disabled = false;
+            localTestBtn.textContent = "一键启动&测试";
           }
         },
       },
       "一键启动&测试"
     );
 
-    const stopBtn = el(
+    const localStopBtn = el(
       "button",
       {
         class: "btn btn-danger",
@@ -1353,14 +1439,14 @@
         onclick: async () => {
           try {
             await apiPost("/api/llm/stop", {});
-            await syncFromStatus();
-            toast("已停止 LLM。");
+            await syncLocalFromStatus();
+            toast("已停止本地 LLM。");
           } catch (e) {
             toast(String(e.message || e), "bad");
           }
         },
       },
-      "停止"
+      "停止本地"
     );
 
     const openDirBtn = el(
@@ -1387,7 +1473,7 @@
       el(
         "div",
         { class: "card" },
-        el("div", { class: "label" }, "配置"),
+        el("div", { class: "label" }, "本地 llama.cpp（离线）"),
         el("div", { class: "row" }, el("span", { class: "label" }, "server"), serverPath),
         el("div", { class: "row" }, el("span", { class: "label" }, "model"), modelPath),
         el(
@@ -1402,14 +1488,144 @@
           el("span", { class: "label" }, "sleep"),
           sleep
         ),
-        el("div", { class: "row" }, preset8g, testBtn, stopBtn, openDirBtn),
-        el("div", { class: "muted" }, "说明：本页用于“确认 Qwen 是否真的在工作”。测试会启动 llama-server 并发出一次 JSON 请求。")
+        el("div", { class: "row" }, preset8g, localTestBtn, localStopBtn, openDirBtn),
+        el("div", { class: "muted" }, "说明：用于离线生成（默认 Qwen 2.5 3B GGUF）。测试会启动 llama-server 并发出一次 JSON 请求。")
       )
     );
+    root.appendChild(localStatusBox);
 
-    root.appendChild(statusBox);
+    // OpenAI-compatible API (optional)
+    const apiBaseUrl = el("input", { class: "input", style: "flex:1", placeholder: "base_url（OpenAI 兼容，通常以 /v1 结尾）" });
+    const apiModel = el("input", { class: "input", style: "flex:1", placeholder: "model（例如 gpt-4o-mini / deepseek-chat / qwen-…）" });
+    const apiKey = el("input", { class: "input", style: "flex:1", type: "password", placeholder: "api_key（不显示；可从环境变量读取）" });
+    const saveKey = el("input", { type: "checkbox" });
 
-    syncFromStatus().catch((e) => toast(String(e.message || e), "bad"));
+    const apiStatusBox = el("div", { class: "card" }, el("div", { class: "muted" }, "正在读取 API 状态…"));
+
+    function renderApiStatus() {
+      const st = state.llmApi || {};
+      clear(apiStatusBox);
+      apiStatusBox.appendChild(el("div", { class: "label" }, "API 状态（OpenAI-compatible）"));
+      const rows = [
+        ["base_url", st.base_url || ""],
+        ["model", st.model || ""],
+        ["api_key_present", String(!!st.api_key_present)],
+        ["api_key_masked", st.api_key_masked || ""],
+        ["source.base_url", (st.source && st.source.base_url) || ""],
+        ["source.model", (st.source && st.source.model) || ""],
+        ["source.api_key", (st.source && st.source.api_key) || ""],
+      ];
+      apiStatusBox.appendChild(
+        el(
+          "div",
+          { class: "list" },
+          ...rows.map(([k, v]) =>
+            el(
+              "div",
+              { class: "item" },
+              el("div", { class: "item-header" }, el("span", { class: "badge mono" }, k), el("span", { class: "muted mono" }, v))
+            )
+          )
+        )
+      );
+    }
+
+    async function syncApiFromStatus() {
+      await refreshLLMStatus();
+      const st = state.llmApi || {};
+      apiBaseUrl.value = st.base_url || "";
+      apiModel.value = st.model || "";
+      renderApiStatus();
+    }
+
+    const apiSaveBtn = el(
+      "button",
+      {
+        class: "btn btn-primary",
+        type: "button",
+        onclick: async () => {
+          apiSaveBtn.disabled = true;
+          apiSaveBtn.textContent = "保存中…";
+          try {
+            await apiPost("/api/llm/api/save", {
+              base_url: (apiBaseUrl.value || "").trim(),
+              model: (apiModel.value || "").trim(),
+              api_key: (apiKey.value || "").trim(),
+              save_api_key: !!saveKey.checked,
+            });
+            apiKey.value = "";
+            await syncApiFromStatus();
+            toast("已保存 API 设置。");
+          } catch (e) {
+            await syncApiFromStatus().catch(() => {});
+            toast(String(e.message || e), "bad", 6500);
+          } finally {
+            apiSaveBtn.disabled = false;
+            apiSaveBtn.textContent = "保存 API 设置";
+          }
+        },
+      },
+      "保存 API 设置"
+    );
+
+    const apiTestBtn = el(
+      "button",
+      {
+        class: "btn",
+        type: "button",
+        onclick: async () => {
+          apiTestBtn.disabled = true;
+          apiTestBtn.textContent = "测试中…";
+          try {
+            const r = await apiPost("/api/llm/api/test", {
+              base_url: (apiBaseUrl.value || "").trim(),
+              model: (apiModel.value || "").trim(),
+              api_key: (apiKey.value || "").trim(),
+            });
+            if (r.ok) {
+              toast(`API 测试通过：${r.model}`, "good");
+            } else {
+              let msg = `API 测试失败（HTTP ${r.http}）`;
+              if (r.error) msg += `：${String(r.error).slice(0, 160)}`;
+              toast(msg, "bad", 6500);
+            }
+          } catch (e) {
+            toast(String(e.message || e), "bad", 6500);
+          } finally {
+            apiTestBtn.disabled = false;
+            apiTestBtn.textContent = "测试 API";
+          }
+        },
+      },
+      "测试 API"
+    );
+
+    root.appendChild(
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "label" }, "大模型 API（OpenAI-compatible，可选）"),
+        el("div", { class: "row" }, el("span", { class: "label" }, "base_url"), apiBaseUrl),
+        el("div", { class: "row" }, el("span", { class: "label" }, "model"), apiModel),
+        el("div", { class: "row" }, el("span", { class: "label" }, "api_key"), apiKey),
+        el(
+          "div",
+          { class: "row" },
+          el("label", { class: "row", style: "gap:8px" }, saveKey, el("span", { class: "muted" }, "保存 api_key 到 settings.json（不建议在共享电脑上勾选）")),
+          apiSaveBtn,
+          apiTestBtn
+        ),
+        el(
+          "div",
+          { class: "muted" },
+          "提示：默认优先读取环境变量 SKILL_LLM_API_KEY / SKILL_LLM_BASE_URL / SKILL_LLM_MODEL（或 OPENAI_*）。"
+        )
+      )
+    );
+    root.appendChild(apiStatusBox);
+
+    syncLocalFromStatus().catch((e) => toast(String(e.message || e), "bad"));
+    syncApiFromStatus().catch(() => {});
     return root;
   }
 
@@ -1435,8 +1651,8 @@
         { class: "card" },
         el("div", { class: "label" }, "Qwen 的作用在哪里？"),
         el("div", null, "扫描：只用向量检索（FAISS），不调用 LLM。"),
-        el("div", null, "润色：调用本地 Qwen（llama.cpp）输出 JSON，包含：诊断 + 轻改/中改 + 引用证据。"),
-        el("div", { class: "muted" }, "如果“对齐润色”页能看到带引用的诊断/改写，就说明 Qwen 已在工作。")
+        el("div", null, "润色：默认调用本地 Qwen（llama.cpp）输出 JSON（诊断 + 轻改/中改 + 引用证据）。也可切换到大模型 API（OpenAI 兼容）。"),
+        el("div", { class: "muted" }, "如何确认：对齐润色结果顶部会显示“LLM：…”（本地模型文件名或 API 的 model/base_url）。")
       )
     );
   }

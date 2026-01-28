@@ -44,6 +44,13 @@ Expected paths:
 
 From source you can download them with `download_llm_assets.bat`.
 
+### Optional: OpenAI-compatible LLM API
+
+If you want to use a remote LLM (instead of local llama.cpp), configure it in **LLM Settings** or set env vars:
+- `SKILL_LLM_API_KEY` (or `OPENAI_API_KEY`)
+- `SKILL_LLM_BASE_URL` (or `OPENAI_BASE_URL`, usually ends with `/v1`)
+- `SKILL_LLM_MODEL` (or `OPENAI_MODEL`)
+
 ### Data & Cache Location (Portable)
 
 By default, the app stores data next to the project folder:
@@ -108,6 +115,13 @@ TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范
 - `models/llm/qwen2.5-3b-instruct-q4_k_m.gguf`
 
 源码模式可用 `download_llm_assets.bat` 自动下载。
+
+### 可选：大模型 API（OpenAI 兼容）
+
+如果你想用“云端 API”替代本地 llama.cpp，可在 **LLM 设置** 页面配置，或设置环境变量：
+- `SKILL_LLM_API_KEY`（或 `OPENAI_API_KEY`）
+- `SKILL_LLM_BASE_URL`（或 `OPENAI_BASE_URL`，通常以 `/v1` 结尾）
+- `SKILL_LLM_MODEL`（或 `OPENAI_MODEL`）
 
 ### 数据与缓存位置（便于清理）
 

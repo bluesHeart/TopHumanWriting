@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover
     _filedialog = None
 
 from aiwd.llama_server import LlamaServerConfig, LlamaServerProcess
+from aiwd.openai_compat import OpenAICompatClient, OpenAICompatConfig, extract_first_content, mask_secret, normalize_base_url
 from aiwd.citation_bank import CitationBankError, CitationBankIndexer
 from aiwd.polish import PolishValidationError, build_polish_prompt, extract_json, validate_polish_json
 from aiwd.rag_index import RagIndexError, RagIndexer
@@ -37,6 +38,7 @@ from ai_word_detector import (  # type: ignore
     SEMANTIC_EMBED_BATCH,
     SEMANTIC_PROGRESS_EVERY_S,
     SemanticEmbedder,
+    Settings,
     get_app_dir,
     get_settings_dir,
     normalize_soft_line_breaks_preserve_len,
@@ -547,6 +549,178 @@ class LLMManager:
             )
 
 
+class LLMApiManager:
+    """
+    OpenAI-compatible API settings (base_url / model / api_key).
+
+    - Defaults read from environment variables:
+        TOPHUMANWRITING_LLM_API_KEY / _BASE_URL / _MODEL
+        SKILL_LLM_API_KEY / _BASE_URL / _MODEL
+        OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
+    - Optional overrides stored in settings.json (via ai_word_detector.Settings).
+    """
+
+    def __init__(self, *, settings: Settings):
+        self.settings = settings
+
+    @staticmethod
+    def _first_env(*names: str) -> str:
+        for n in names:
+            v = os.environ.get(n, "")
+            if v and v.strip():
+                return v.strip()
+        return ""
+
+    def _resolve_value(self, *, key: str, env_names: list[str], default: str = "") -> tuple[str, str]:
+        v0 = (self.settings.get(key, "") or "").strip()
+        if v0:
+            return v0, "settings"
+        v1 = self._first_env(*env_names)
+        if v1:
+            # Return the first hit name for UI clarity.
+            for n in env_names:
+                vv = os.environ.get(n, "")
+                if vv and vv.strip():
+                    return vv.strip(), f"env:{n}"
+        return (default or "").strip(), "default"
+
+    def resolve_config(self, *, overrides: Optional[dict] = None) -> OpenAICompatConfig:
+        overrides = overrides or {}
+
+        api_key, _ = self._resolve_value(
+            key="llm_api_key",
+            env_names=[
+                "TOPHUMANWRITING_LLM_API_KEY",
+                "SKILL_LLM_API_KEY",
+                "OPENAI_API_KEY",
+            ],
+            default="",
+        )
+        base_url, _ = self._resolve_value(
+            key="llm_api_base_url",
+            env_names=[
+                "TOPHUMANWRITING_LLM_BASE_URL",
+                "SKILL_LLM_BASE_URL",
+                "OPENAI_BASE_URL",
+            ],
+            default="https://api.openai.com/v1",
+        )
+        model, _ = self._resolve_value(
+            key="llm_api_model",
+            env_names=[
+                "TOPHUMANWRITING_LLM_MODEL",
+                "SKILL_LLM_MODEL",
+                "OPENAI_MODEL",
+            ],
+            default="gpt-4o-mini",
+        )
+
+        # Allow per-request overrides (useful for testing without persisting secrets).
+        api_key = (str(overrides.get("api_key", "") or "").strip()) or api_key
+        base_url = (str(overrides.get("base_url", "") or "").strip()) or base_url
+        model = (str(overrides.get("model", "") or "").strip()) or model
+
+        base_url = normalize_base_url(base_url)
+
+        return OpenAICompatConfig(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout_s=float(overrides.get("timeout_s", 60.0) or 60.0),
+            max_retries=int(overrides.get("max_retries", 3) or 3),
+        )
+
+    def status(self) -> dict:
+        api_key, api_key_src = self._resolve_value(
+            key="llm_api_key",
+            env_names=["TOPHUMANWRITING_LLM_API_KEY", "SKILL_LLM_API_KEY", "OPENAI_API_KEY"],
+            default="",
+        )
+        base_url, base_src = self._resolve_value(
+            key="llm_api_base_url",
+            env_names=["TOPHUMANWRITING_LLM_BASE_URL", "SKILL_LLM_BASE_URL", "OPENAI_BASE_URL"],
+            default="https://api.openai.com/v1",
+        )
+        model, model_src = self._resolve_value(
+            key="llm_api_model",
+            env_names=["TOPHUMANWRITING_LLM_MODEL", "SKILL_LLM_MODEL", "OPENAI_MODEL"],
+            default="gpt-4o-mini",
+        )
+        base_url = normalize_base_url(base_url)
+        return {
+            "base_url": base_url,
+            "model": model,
+            "api_key_present": bool(api_key),
+            "api_key_masked": mask_secret(api_key),
+            "source": {"base_url": base_src, "model": model_src, "api_key": api_key_src},
+        }
+
+    def save(self, *, base_url: str, model: str, api_key: str, save_api_key: bool) -> dict:
+        base_url = normalize_base_url(base_url)
+        model = (model or "").strip()
+        api_key = (api_key or "").strip()
+
+        if base_url:
+            self.settings.set("llm_api_base_url", base_url)
+        else:
+            self.settings.set("llm_api_base_url", "")
+
+        if model:
+            self.settings.set("llm_api_model", model)
+        else:
+            self.settings.set("llm_api_model", "")
+
+        if save_api_key:
+            self.settings.set("llm_api_key", api_key)
+        else:
+            # Do not persist secrets unless explicitly requested.
+            self.settings.set("llm_api_key", "")
+
+        return self.status()
+
+    def test(self, *, overrides: Optional[dict] = None) -> dict:
+        cfg = self.resolve_config(overrides=overrides or {})
+        if not cfg.api_key:
+            raise RuntimeError("missing api key (set SKILL_LLM_API_KEY / OPENAI_API_KEY)")
+        if not cfg.base_url_v1:
+            raise RuntimeError("missing base_url")
+        if not cfg.model:
+            raise RuntimeError("missing model")
+
+        client = OpenAICompatClient(cfg)
+        status, resp = client.chat(
+            messages=[
+                {"role": "system", "content": "Return STRICT JSON only."},
+                {"role": "user", "content": "{\"ok\": true}"},
+            ],
+            temperature=0.0,
+            max_tokens=32,
+            response_format={"type": "json_object"},
+            timeout_s=30.0,
+        )
+        content = extract_first_content(resp)
+        error = ""
+        if int(status or 0) != 200:
+            try:
+                if isinstance(resp, dict):
+                    if isinstance(resp.get("error", None), dict):
+                        error = (resp.get("error", {}) or {}).get("message", "") or ""
+                    if not error:
+                        error = str(resp.get("_raw", "") or resp.get("_error", "") or "").strip()
+            except Exception:
+                error = ""
+        if error and len(error) > 500:
+            error = error[:500] + "…"
+        return {
+            "ok": bool(int(status or 0) == 200),
+            "http": int(status or 0),
+            "base_url": cfg.base_url_v1,
+            "model": cfg.model,
+            "content_preview": (content[:200] + "…") if len(content) > 200 else content,
+            "error": error,
+        }
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="TopHumanWriting", version=str(VERSION or "0.0.0"))
     # Allow the local file-based splash screen (file://) to probe /api/health via fetch.
@@ -566,14 +740,18 @@ def create_app() -> FastAPI:
     embedder = LazySemanticEmbedder(semantic_dir, model_id="Xenova/paraphrase-multilingual-MiniLM-L12-v2")
 
     tasks = TaskManager()
+    settings = Settings()
     rag = RagManager(data_dir=get_settings_dir(), library_manager=library_manager, embedder=embedder)
     cite = CiteManager(data_dir=get_settings_dir(), library_manager=library_manager, embedder=embedder)
     llm = LLMManager(data_dir=get_settings_dir())
+    llm_api = LLMApiManager(settings=settings)
     clients = ClientRegistry()
 
     try:
         app.state.tasks = tasks
         app.state.llm = llm
+        app.state.llm_api = llm_api
+        app.state.settings = settings
         app.state.clients = clients
         app.state.started_at = time.time()
         app.state.exit_requested = False
@@ -776,6 +954,28 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
     @app.get("/api/llm/status")
     def llm_status():
         return llm.status()
+
+    @app.get("/api/llm/api/status")
+    def llm_api_status():
+        return llm_api.status()
+
+    @app.post("/api/llm/api/save")
+    def llm_api_save(payload: dict = Body(default={})):
+        base_url = (payload.get("base_url", "") or "").strip()
+        model = (payload.get("model", "") or "").strip()
+        api_key = (payload.get("api_key", "") or "").strip()
+        save_api_key = bool(payload.get("save_api_key", False))
+        try:
+            return llm_api.save(base_url=base_url, model=model, api_key=api_key, save_api_key=save_api_key)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/api/llm/api/test")
+    def llm_api_test(payload: dict = Body(default={})):
+        try:
+            return llm_api.test(overrides=payload or {})
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     @app.post("/api/llm/stop")
     def llm_stop():
@@ -1087,8 +1287,33 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
         if not do_generate:
             return out
 
-        if not llm.ensure_started(timeout_s=45.0):
-            raise HTTPException(status_code=500, detail="failed to start llama-server")
+        provider = (payload.get("provider", "local") or "local").strip().lower()
+        if provider not in ("local", "api"):
+            provider = "local"
+
+        api_client: Optional[OpenAICompatClient] = None
+        api_cfg: Optional[OpenAICompatConfig] = None
+        if provider == "api":
+            try:
+                api_cfg = llm_api.resolve_config(
+                    overrides={
+                        "api_key": payload.get("api_key", ""),
+                        "base_url": payload.get("base_url", ""),
+                        "model": payload.get("model", ""),
+                    }
+                )
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            if not api_cfg.api_key:
+                raise HTTPException(status_code=400, detail="missing api key (set SKILL_LLM_API_KEY / OPENAI_API_KEY)")
+            if not api_cfg.base_url_v1:
+                raise HTTPException(status_code=400, detail="missing base_url (set SKILL_LLM_BASE_URL / OPENAI_BASE_URL)")
+            if not api_cfg.model:
+                raise HTTPException(status_code=400, detail="missing model (set SKILL_LLM_MODEL / OPENAI_MODEL)")
+            api_client = OpenAICompatClient(api_cfg)
+        else:
+            if not llm.ensure_started(timeout_s=45.0):
+                raise HTTPException(status_code=500, detail="failed to start llama-server")
 
         lang = LanguageDetector.detect(selected)
         prompt = build_polish_prompt(selected_text=selected, citations=c_list, language=lang)
@@ -1106,25 +1331,43 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
         last_err = ""
         parsed = None
         for attempt in range(1, retries + 2):
-            status, resp = llm.chat(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"},
-                timeout_s=180.0,
-            )
+            if provider == "api":
+                assert api_client is not None
+                status, resp = api_client.chat(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format={"type": "json_object"},
+                    timeout_s=180.0,
+                )
+            else:
+                status, resp = llm.chat(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format={"type": "json_object"},
+                    timeout_s=180.0,
+                )
             if int(status or 0) != 200 or not isinstance(resp, dict):
                 last_err = f"http {status}"
+                if provider == "api":
+                    err_preview = ""
+                    try:
+                        if isinstance(resp, dict):
+                            if isinstance(resp.get("error", None), dict):
+                                err_preview = (resp.get("error", {}) or {}).get("message", "") or ""
+                            if not err_preview:
+                                err_preview = str(resp.get("_raw", "") or resp.get("_error", "") or "").strip()
+                    except Exception:
+                        err_preview = ""
+                    if err_preview:
+                        if len(err_preview) > 500:
+                            err_preview = err_preview[:500] + "…"
+                        last_err = f"{last_err}: {err_preview}"
+                    code = 400 if int(status or 0) in (401, 403) else 502
+                    raise HTTPException(status_code=code, detail=f"api request failed: {last_err}")
                 continue
-            content = ""
-            try:
-                choices = resp.get("choices", [])
-                if isinstance(choices, list) and choices:
-                    msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-                    if isinstance(msg, dict):
-                        content = (msg.get("content", "") or "").strip()
-            except Exception:
-                content = ""
+            content = extract_first_content(resp)
             data = extract_json(content) if content else None
             if not isinstance(data, dict):
                 last_err = "bad json"
@@ -1168,6 +1411,17 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
                 detail += " (output may be truncated; try increasing max_tokens)"
             raise HTTPException(status_code=500, detail=detail)
 
+        used_llm = {}
+        if provider == "api":
+            used_llm = {"provider": "api", "base_url": (api_cfg.base_url_v1 if api_cfg else ""), "model": (api_cfg.model if api_cfg else "")}
+        else:
+            st2 = llm.status()
+            used_llm = {
+                "provider": "local",
+                "base_url": st2.get("base_url", ""),
+                "model_path": st2.get("model_path", ""),
+            }
+
         out["result"] = {
             "language": getattr(parsed, "language", "mixed"),
             "diagnosis": [
@@ -1189,6 +1443,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
                 for v in (getattr(parsed, "variants", []) or [])
             ],
         }
+        out["llm"] = used_llm
         return out
 
     @app.post("/api/library/open_pdf")
