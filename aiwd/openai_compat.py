@@ -116,9 +116,13 @@ class OpenAICompatConfig:
 
     def auth_headers(self) -> dict:
         k = (self.api_key or "").strip()
+        # Some gateways are protected by WAF rules that block non-browser User-Agents
+        # (e.g. Cloudflare 1010). Use a conservative UA by default.
+        base = {"User-Agent": "Mozilla/5.0"}
         if not k:
-            return {}
-        return {"Authorization": f"Bearer {k}"}
+            return base
+        base["Authorization"] = f"Bearer {k}"
+        return base
 
 
 class OpenAICompatClient:
