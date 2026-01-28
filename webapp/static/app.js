@@ -17,15 +17,19 @@
     lastCite: null,
     llm: null,
     llmApi: null,
+    libraryStatus: null,
     buildTaskId: localStorage.getItem("aiw.buildTaskId") || "",
     buildPollTimer: null,
     citeTaskId: localStorage.getItem("aiw.citeTaskId") || "",
     citePollTimer: null,
     pdfFolder: localStorage.getItem("aiw.pdfFolder") || "",
+    scanDraft: localStorage.getItem("aiw.scanDraft") || "",
     polishDraft: localStorage.getItem("aiw.polishDraft") || "",
     clientId: sessionStorage.getItem("aiw.clientId") || "",
     clientHeartbeatTimer: null,
   };
+
+  let renderSeq = 0;
 
   function hexToRgba(hex, a) {
     const h = String(hex || "").replace("#", "");
@@ -85,6 +89,19 @@
 
   const apiGet = (url) => api("GET", url);
   const apiPost = (url, body) => api("POST", url, body);
+
+  function maybeOpenIndexModalForError(msg) {
+    const m = String(msg || "").toLowerCase();
+    if (m.includes("rag index missing") || m.includes("build library first")) {
+      openIndexModal("rag", state.libraryStatus || {});
+      return true;
+    }
+    if (m.includes("citation bank missing") || m.includes("cite index missing") || m.includes("build it first")) {
+      openIndexModal("cite", state.libraryStatus || {});
+      return true;
+    }
+    return false;
+  }
 
   async function apiFormPost(url, form) {
     const resp = await fetch(url, { method: "POST", body: form });
@@ -357,11 +374,14 @@
 
   async function refreshLibraryStatus() {
     if (!state.library) {
+      state.libraryStatus = null;
       formatIndexChips(null);
       return;
     }
     const st = await apiGet(`/api/library/status?library=${encodeURIComponent(state.library)}`);
+    state.libraryStatus = st || null;
     formatIndexChips(st);
+    return st;
   }
 
   function renderHeader(title, subtitle) {
@@ -490,9 +510,19 @@
           const name = (createName.value || "").trim();
           if (!name) return toast("请输入库名。", "bad");
           try {
-            await apiPost("/api/libraries", { name });
+            const r = await apiPost("/api/libraries", { name });
+            let safe = name;
+            try {
+              const p = String((r && r.path) || "");
+              const base = p.split(/[\\/]/).pop() || "";
+              if (base.toLowerCase().endsWith(".json")) safe = base.slice(0, -5) || safe;
+            } catch {}
+            state.library = safe;
+            localStorage.setItem("aiw.library", state.library);
             await refreshLibraries();
             await refreshLibraryStatus();
+            await syncPdfRoot();
+            createName.value = "";
             toast("已创建文献库。");
           } catch (e) {
             toast(String(e.message || e), "bad");
@@ -744,9 +774,9 @@
       el(
         "div",
         { class: "card" },
-        el("div", { class: "label" }, "新建文献库"),
+        el("div", { class: "label" }, "1) 创建文献库"),
         el("div", { class: "row" }, createName, createBtn),
-        el("div", { class: "muted" }, "库会存到本机数据目录（TopHumanWriting_data/…；兼容旧 AIWordDetector_data/）。")
+        el("div", { class: "muted" }, "创建后会自动切换到该库。库会存到本机数据目录（TopHumanWriting_data/…；兼容旧 AIWordDetector_data/）。")
       )
     );
 
@@ -754,7 +784,7 @@
       el(
         "div",
         { class: "card" },
-        el("div", { class: "label" }, "导入 PDF（不会弹 PowerShell）"),
+        el("div", { class: "label" }, "2) 导入范文 PDF（浏览器选文件夹）"),
         el("div", { class: "row" }, pickBtn, importBtn, clearImportBtn),
         selectedInfo,
         importProgressBar,
@@ -767,7 +797,7 @@
       el(
         "div",
         { class: "card" },
-        el("div", { class: "label" }, "建索引（FAISS）"),
+        el("div", { class: "label" }, "3) 建索引（用于扫描/润色）"),
         el("div", { class: "row" }, buildBtn, cancelBtn),
         progressBar,
         progressText,
@@ -789,8 +819,14 @@
     const root = el("div", { class: "grid", style: "gap:18px" });
 
     const text = el("textarea", { class: "textarea", placeholder: "粘贴你的正文（中英混合可）…" });
-    const topk = el("input", { class: "input", value: "6", style: "width:100px", inputmode: "numeric" });
-    const maxItems = el("input", { class: "input", value: "220", style: "width:110px", inputmode: "numeric" });
+    text.value = state.scanDraft || "";
+    text.addEventListener("input", () => {
+      state.scanDraft = text.value || "";
+      localStorage.setItem("aiw.scanDraft", state.scanDraft);
+    });
+
+    const topk = el("input", { class: "input", value: "6", style: "width:110px", inputmode: "numeric", title: "每句检索多少条范文片段作为对照（越大越慢）" });
+    const maxItems = el("input", { class: "input", value: "220", style: "width:130px", inputmode: "numeric", title: "最多扫描多少句（越大越慢）" });
 
     const runBtn = el(
       "button",
@@ -799,6 +835,10 @@
         type: "button",
         onclick: async () => {
           if (!state.library) return toast("请先选择文献库。", "bad");
+          if (!(state.libraryStatus && state.libraryStatus.rag_index)) {
+            toast("缺少 RAG（范文检索索引）：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
+            return openIndexModal("rag", state.libraryStatus || {});
+          }
           const raw = (text.value || "").trim();
           if (!raw) return toast("请先粘贴文本。", "bad");
           runBtn.disabled = true;
@@ -814,7 +854,8 @@
             toast("扫描完成。");
             renderScanResults();
           } catch (e) {
-            toast(String(e.message || e), "bad", 6500);
+            const msg = String(e.message || e);
+            if (!maybeOpenIndexModalForError(msg)) toast(msg, "bad", 6500);
           } finally {
             runBtn.disabled = false;
             runBtn.textContent = "开始扫描";
@@ -824,7 +865,46 @@
       "开始扫描"
     );
 
-    const resultsBox = el("div", { class: "card" }, el("div", { class: "muted" }, "结果将在这里显示。"));
+    const resultsBox = el("div", { class: "card" });
+    function renderEmptyResultsHint() {
+      clear(resultsBox);
+      if (!state.library) {
+        resultsBox.appendChild(el("div", { class: "muted" }, "请先在顶部选择文献库。"));
+        return;
+      }
+      const ragOk = !!(state.libraryStatus && state.libraryStatus.rag_index);
+      if (!ragOk) {
+        resultsBox.appendChild(el("div", { class: "label" }, "还不能扫描：缺少 RAG（范文检索索引）"));
+        resultsBox.appendChild(el("div", { class: "muted" }, "先到“文献库”完成：导入 PDF → 建索引。完成后再回来扫描。"));
+        resultsBox.appendChild(
+          el(
+            "div",
+            { class: "row" },
+            el(
+              "button",
+              {
+                class: "btn btn-primary",
+                type: "button",
+                onclick: () => openIndexModal("rag", state.libraryStatus || {}),
+              },
+              "查看如何建索引"
+            ),
+            el(
+              "button",
+              {
+                class: "btn",
+                type: "button",
+                onclick: () => setRoute("library"),
+              },
+              "去文献库"
+            )
+          )
+        );
+        return;
+      }
+      resultsBox.appendChild(el("div", { class: "muted" }, "结果将在这里显示（按对齐度从低到高排序）。"));
+    }
+    renderEmptyResultsHint();
 
     function renderScanResults() {
       clear(resultsBox);
@@ -889,9 +969,9 @@
       el(
         "div",
         { class: "row" },
-        el("span", { class: "label" }, "top_k"),
+        el("span", { class: "label" }, "每句范文数"),
         topk,
-        el("span", { class: "label" }, "max_items"),
+        el("span", { class: "label" }, "最多扫描句子"),
         maxItems,
         runBtn,
         el("span", { class: "muted" }, "扫描仅做检索：不调用 LLM。")
@@ -945,11 +1025,53 @@
       el("span", { class: "muted" }, "温度固定 0（尽量不发散）。API 需先在“LLM 设置”配置。")
     );
 
-    const exemplarsBox = el("div", { class: "card" }, el("div", { class: "muted" }, "先获取范文对照。"));
-    const outBox = el("div", { class: "card" }, el("div", { class: "muted" }, "生成结果将在这里显示。"));
+    const exemplarsBox = el("div", { class: "card" });
+    const outBox = el("div", { class: "card" });
+
+    function renderExemplarsEmpty() {
+      clear(exemplarsBox);
+      if (!state.library) {
+        exemplarsBox.appendChild(el("div", { class: "muted" }, "请先在顶部选择文献库。"));
+        return;
+      }
+      const ragOk = !!(state.libraryStatus && state.libraryStatus.rag_index);
+      if (!ragOk) {
+        exemplarsBox.appendChild(el("div", { class: "label" }, "缺少 RAG（范文检索索引）"));
+        exemplarsBox.appendChild(el("div", { class: "muted" }, "先到“文献库”完成：导入 PDF → 建索引。完成后再回来润色。"));
+        exemplarsBox.appendChild(
+          el(
+            "div",
+            { class: "row" },
+            el(
+              "button",
+              { class: "btn btn-primary", type: "button", onclick: () => openIndexModal("rag", state.libraryStatus || {}) },
+              "查看如何建索引"
+            ),
+            el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "去文献库")
+          )
+        );
+        return;
+      }
+      exemplarsBox.appendChild(el("div", { class: "muted" }, "先获取范文对照（C1..Ck），再生成白箱润色。"));
+    }
+
+    function renderOutEmpty() {
+      clear(outBox);
+      outBox.appendChild(el("div", { class: "label" }, "白箱输出将在这里展示"));
+      outBox.appendChild(el("div", { class: "muted" }, "包含：对齐度对比（原文/轻改/中改） + 诊断（带证据） + 改写（带引用）。"));
+      outBox.appendChild(el("div", { class: "muted" }, "建议流程：先点“获取范文对照”确认证据 → 再点“生成对齐润色”。"));
+    }
+
+    renderExemplarsEmpty();
+    renderOutEmpty();
 
     async function fetchExemplars() {
       if (!state.library) return toast("请先选择文献库。", "bad");
+      if (!(state.libraryStatus && state.libraryStatus.rag_index)) {
+        toast("缺少 RAG（范文检索索引）：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
+        openIndexModal("rag", state.libraryStatus || {});
+        throw new Error("rag index missing (build library first)");
+      }
       const txt = (selected.value || "").trim();
       if (txt.length < 8) return toast("选中文本太短。", "bad");
       try {
@@ -965,7 +1087,8 @@
         toast("已获取范文对照。");
         return r;
       } catch (e) {
-        toast(String(e.message || e), "bad", 6500);
+        const msg = String(e.message || e);
+        if (!maybeOpenIndexModalForError(msg)) toast(msg, "bad", 6500);
         throw e;
       }
     }
@@ -1150,6 +1273,10 @@
         type: "button",
         onclick: async () => {
           if (!state.library) return toast("请先选择文献库。", "bad");
+          if (!(state.libraryStatus && state.libraryStatus.rag_index)) {
+            toast("缺少 RAG（范文检索索引）：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
+            return openIndexModal("rag", state.libraryStatus || {});
+          }
           const txt = (selected.value || "").trim();
           if (txt.length < 8) return toast("选中文本太短。", "bad");
 
@@ -1194,6 +1321,8 @@
                 "生成结果格式不完整（常见原因：输出长度太小或 API 推理占用大量 tokens）。请打开“高级设置”，把输出长度调大（本地建议 ≥ 650；API 建议 ≥ 4096）后重试。";
             } else if (msg.includes("failed to start llama-server")) {
               msg = "启动本地模型失败：请到“LLM 设置”页点击“一键启动&测试”。";
+            } else if (maybeOpenIndexModalForError(msg)) {
+              msg = "";
             } else if (msg.includes("missing api key")) {
               msg = "未配置大模型 API：请到“LLM 设置”页填写/测试，或设置环境变量 SKILL_LLM_API_KEY / OPENAI_API_KEY。";
             } else if (msg.includes("missing base_url")) {
@@ -1207,7 +1336,7 @@
             } else if (msg.includes("api request failed") && msg.includes("http 429")) {
               msg = "API 触发限流（429）：请稍后重试，或降低频率/更换模型。";
             }
-            toast(msg, "bad", 6500);
+            if (msg) toast(msg, "bad", 6500);
           } finally {
             genBtn.disabled = false;
             genBtn.textContent = "生成对齐润色";
@@ -1417,7 +1546,8 @@
             toast("检索完成。");
             renderCiteResults();
           } catch (e) {
-            toast(String(e.message || e), "bad", 6500);
+            const msg = String(e.message || e);
+            if (!maybeOpenIndexModalForError(msg)) toast(msg, "bad", 6500);
           } finally {
             searchBtn.disabled = false;
             searchBtn.textContent = "检索引用句式";
@@ -1899,6 +2029,7 @@
   }
 
   async function render() {
+    const my = ++renderSeq;
     const r = route();
     navActive(r);
     const page = $("#page");
@@ -1906,12 +2037,16 @@
 
     try {
       await refreshLibraries();
+      if (my !== renderSeq) return;
       await refreshLibraryStatus();
+      if (my !== renderSeq) return;
       await refreshLLMStatus();
+      if (my !== renderSeq) return;
     } catch (e) {
       toast(String(e.message || e), "bad", 6500);
     }
 
+    if (my !== renderSeq) return;
     if (r === "scan") page.appendChild(pageScan());
     else if (r === "polish") page.appendChild(pagePolish());
     else if (r === "cite") page.appendChild(pageCite());
@@ -1926,12 +2061,8 @@
     $("#librarySelect").addEventListener("change", async (e) => {
       state.library = e.target.value || "";
       localStorage.setItem("aiw.library", state.library);
-      try {
-        await refreshLibraryStatus();
-        toast(state.library ? "已切换文献库。" : "未选择文献库。", state.library ? "good" : "bad");
-      } catch (err) {
-        toast(String(err.message || err), "bad");
-      }
+      toast(state.library ? `已切换文献库：${state.library}` : "未选择文献库。", state.library ? "good" : "bad");
+      render().catch(() => {});
     });
 
     $("#refreshBtn").addEventListener("click", async () => {
