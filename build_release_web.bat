@@ -61,9 +61,7 @@ copy /y "README.md" "%OUT_DIR%\\README.md" >nul
 copy /y "requirements.txt" "%OUT_DIR%\\requirements.txt" >nul
 copy /y "run_web.bat" "%OUT_DIR%\\run_web.bat" >nul
 copy /y "setup_env.bat" "%OUT_DIR%\\setup_env.bat" >nul
-if exist "start_web.vbs" copy /y "start_web.vbs" "%OUT_DIR%\\start_web.vbs" >nul
 if exist "TopHumanWriting.vbs" copy /y "TopHumanWriting.vbs" "%OUT_DIR%\\TopHumanWriting.vbs" >nul
-if exist "run_web.vbs" copy /y "run_web.vbs" "%OUT_DIR%\\run_web.vbs" >nul
 copy /y "ai_word_detector.py" "%OUT_DIR%\\ai_word_detector.py" >nul
 copy /y "i18n.py" "%OUT_DIR%\\i18n.py" >nul
 copy /y "version.py" "%OUT_DIR%\\version.py" >nul

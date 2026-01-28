@@ -20,7 +20,7 @@ TopHumanWriting is an **offline local web app** for “aligning to top human exe
 
 1. Download the latest `TopHumanWriting_<version>_offline.zip` from GitHub Releases
 2. Unzip it
-3. Run `run_web.vbs` / `TopHumanWriting.vbs` (silent, recommended) or `run_web.bat` (debug)
+3. Run `TopHumanWriting.vbs` (silent, recommended) or `run_web.bat` (debug)
 4. Your browser opens `http://127.0.0.1:7860` (default; auto-switch if occupied)
 
 If it stays on the startup page, open `TopHumanWriting_data/logs/launch.log` (or run `run_web.bat` to see errors).
@@ -96,7 +96,7 @@ TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范
 
 1. 在 GitHub Releases 下载最新的 `TopHumanWriting_<version>_offline.zip`
 2. 解压
-3. 双击 `run_web.vbs` / `TopHumanWriting.vbs`（推荐：不弹黑窗口）或 `run_web.bat`（调试用）
+3. 双击 `TopHumanWriting.vbs`（推荐：不弹黑窗口）或 `run_web.bat`（调试用）
 4. 浏览器会自动打开 `http://127.0.0.1:7860`（默认端口；若被占用会自动换端口）
 
 如果一直停在启动页：打开 `TopHumanWriting_data/logs/launch.log`（或用 `run_web.bat` 看报错）。
