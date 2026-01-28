@@ -19,7 +19,7 @@ TopHumanWriting is an **offline local web app** for “aligning to top human exe
 
 1. Download the latest `TopHumanWriting_<version>_offline.zip` from GitHub Releases
 2. Unzip it
-3. Run `TopHumanWriting.vbs` (silent, recommended) or `run_web.bat` (debug)
+3. Run `run_web.vbs` / `TopHumanWriting.vbs` (silent, recommended) or `run_web.bat` (debug)
 4. Your browser opens `http://127.0.0.1:7860` (default; auto-switch if occupied)
 
 If it stays on the startup page, open `TopHumanWriting_data/logs/launch.log` (or run `run_web.bat` to see errors).
@@ -30,7 +30,7 @@ If it stays on the startup page, open `TopHumanWriting_data/logs/launch.log` (or
 2. Run `run_web.bat`
 
 Main pages:
-- **Library**: create library → pick PDF folder → build index
+- **Library**: create library → select PDF folder → **import to local** → build index
 - **Align Scan**: find least-aligned sentences (retrieval only, no LLM)
 - **Align Polish**: show exemplars (C1..Ck) → generate white-box polish (Qwen via llama.cpp)
 - **Citations**: build/search citation sentence patterns + open PDFs + view References
@@ -50,6 +50,8 @@ If you want to use a remote LLM (instead of local llama.cpp), configure it in **
 - `SKILL_LLM_API_KEY` (or `OPENAI_API_KEY`)
 - `SKILL_LLM_BASE_URL` (or `OPENAI_BASE_URL`, usually ends with `/v1`)
 - `SKILL_LLM_MODEL` (or `OPENAI_MODEL`)
+
+Note: some “reasoning-heavy” API models may need a larger `max_tokens` (e.g. **4096+**) to avoid truncated JSON.
 
 ### Data & Cache Location (Portable)
 
@@ -91,7 +93,7 @@ TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范
 
 1. 在 GitHub Releases 下载最新的 `TopHumanWriting_<version>_offline.zip`
 2. 解压
-3. 双击 `TopHumanWriting.vbs`（推荐：不弹黑窗口）或 `run_web.bat`（调试用）
+3. 双击 `run_web.vbs` / `TopHumanWriting.vbs`（推荐：不弹黑窗口）或 `run_web.bat`（调试用）
 4. 浏览器会自动打开 `http://127.0.0.1:7860`（默认端口；若被占用会自动换端口）
 
 如果一直停在启动页：打开 `TopHumanWriting_data/logs/launch.log`（或用 `run_web.bat` 看报错）。
@@ -102,7 +104,7 @@ TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范
 2. 运行 `run_web.bat`
 
 主要页面：
-- **文献库**：建库/选 PDF 文件夹/建索引
+- **文献库**：建库 → 选 PDF 文件夹 → 导入到本地库 → 建索引（不弹 PowerShell）
 - **对齐扫描**：找出最不像范文的句子（仅检索，不调用 LLM）
 - **对齐润色**：展示范文证据（C1..Ck）→ 生成白箱润色（Qwen + llama.cpp）
 - **引用借鉴**：抽取/检索引用句式库 + 打开原 PDF + 查看 References
@@ -122,6 +124,8 @@ TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范
 - `SKILL_LLM_API_KEY`（或 `OPENAI_API_KEY`）
 - `SKILL_LLM_BASE_URL`（或 `OPENAI_BASE_URL`，通常以 `/v1` 结尾）
 - `SKILL_LLM_MODEL`（或 `OPENAI_MODEL`）
+
+提示：某些“强推理”模型可能需要更大的输出长度（例如 **4096+**）才能避免 JSON 被截断。
 
 ### 数据与缓存位置（便于清理）
 

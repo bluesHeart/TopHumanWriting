@@ -7,6 +7,8 @@ echo ========================================
 echo   TopHumanWriting (Offline) - 运行网页
 echo ========================================
 echo.
+echo 推荐：双击 run_web.vbs / TopHumanWriting.vbs（不弹黑窗口）。
+echo.
 
 set "PY="
 set "PIP="

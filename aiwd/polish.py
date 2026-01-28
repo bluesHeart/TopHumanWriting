@@ -48,32 +48,49 @@ def build_polish_prompt(
     selected_text: str,
     citations: Sequence[Tuple[str, str]],
     language: str,
+    compact: bool = False,
 ) -> str:
     """
     citations: list of (id, text) where id is like "C1" and text is exemplar chunk.
     """
-    rules = [
-        "You are a writing editor. Your job is to rewrite the user's text to better match the style of the exemplar excerpts.",
-        "Goal: emulate exemplar writing style (structure, tone, academic phrasing, transitions) while preserving meaning.",
-        "STYLE ALIGNMENT PRIORITY: focus on sentence-level alignment (openers, transitions, clause order, active/passive voice, nominalization). Prefer borrowing short scaffold phrases from exemplars (NOT full sentences).",
-        "Do NOT add new facts, new claims, new citations, new numbers, or new named entities.",
-        "CRITICAL: do NOT introduce any digits (0-9) or year-like citations in rewrites unless they already appear in USER_TEXT. When borrowing scaffold phrases, exclude author/year parts and keep it generic.",
-        "Only cite from the provided excerpts C1..Ck; do not invent sources.",
-        "WHITE-BOX REQUIREMENT: every diagnosis item must be supported by at least one evidence quote copied verbatim from the provided excerpts.",
-        "Return 3-5 diagnosis items: what is not exemplar-like + how to adjust to match exemplars, each with evidence. Prefer at least 2 items about sentence structure/phrasing patterns (not just word choice).",
-        "DIAGNOSIS MUST BE ACTIONABLE: avoid vague advice like “use academic language”. Each suggestion must include 1-2 concrete scaffold phrases (3-12 words) that appear verbatim in the evidence quote, and explain how to use them (no author names/years unless already in USER_TEXT).",
-        "SUGGESTION FORMAT (required): start suggestion with `Scaffold: \"...\"` (copy a reusable scaffold phrase from evidence), then explain the rewrite move in 1 sentence.",
-        "Return exactly TWO rewrites: one with level='light' and one with level='medium'.",
-        "Light: minimal wording/flow edits. Medium: more rephrasing to match exemplar tone, still preserve meaning.",
-        "REWRITE MUST SHOW STYLE ALIGNMENT: each rewrite must incorporate at least ONE scaffold phrase borrowed from the exemplars (generic phrasing only; do not copy author names/years).",
-        "For citations/evidence: quote MUST be an exact substring from the corresponding exemplar text.",
-        "EVIDENCE QUOTE QUALITY: keep each quote short (<= 180 chars), and prefer quoting the generic scaffold snippet only (avoid author/year/digits when possible).",
-        "CITATIONS ARE REQUIRED: every diagnosis item must include evidence; every rewrite variant must include 1-4 citations.",
-        "STRICTNESS: output must be valid JSON (no markdown). Ensure brackets/quotes are closed; do not include raw newlines inside JSON strings (replace line breaks with spaces).",
-        "CONCISENESS: keep title <= 12 words, problem/suggestion <= 2 sentences, changes <= 8 bullets total, each <= 18 words.",
-        "LANGUAGE: follow LANGUAGE_HINT strictly; write diagnosis + rewrites in the same language as USER_TEXT (zh/en/mixed).",
-        "Return STRICT JSON only (no markdown), matching the schema described.",
-    ]
+    if compact:
+        rules = [
+            "You are a writing editor. Rewrite USER_TEXT to better match EXEMPLARS style while preserving meaning.",
+            "STYLE ALIGNMENT PRIORITY: sentence-level alignment (openers, transitions, clause order, academic phrasing). Borrow short scaffold phrases from exemplars (NOT full sentences).",
+            "NO META: do not mention AI/models or add disclaimers/apologies.",
+            "PRESERVE VOICE: do not change narrative perspective (do not introduce 'we/our/I' if absent in USER_TEXT).",
+            "Do NOT add new facts/claims/citations/numbers/entities. Do NOT introduce any digits unless already in USER_TEXT.",
+            "Only cite from C1..Ck. WHITE-BOX: every diagnosis + rewrite must include evidence quotes that are exact substrings of the provided excerpts.",
+            "Return exactly 3 diagnosis items (actionable; include Scaffold: \"...\" copied verbatim from evidence).",
+            "Return exactly 2 rewrites: level='light' and level='medium'. Each rewrite must include at least ONE scaffold phrase from exemplars (generic phrasing only).",
+            "STRICT JSON ONLY (no markdown). No raw newlines inside JSON strings (replace with spaces).",
+            "LANGUAGE: follow LANGUAGE_HINT; write diagnosis + rewrites in the same language as USER_TEXT.",
+        ]
+    else:
+        rules = [
+            "You are a writing editor. Your job is to rewrite the user's text to better match the style of the exemplar excerpts.",
+            "Goal: emulate exemplar writing style (structure, tone, academic phrasing, transitions) while preserving meaning.",
+            "STYLE ALIGNMENT PRIORITY: focus on sentence-level alignment (openers, transitions, clause order, active/passive voice, nominalization). Prefer borrowing short scaffold phrases from exemplars (NOT full sentences).",
+            "NO META: do not mention AI, models, or provide disclaimers/apologies. Output only the requested JSON content.",
+            "PRESERVE VOICE: do not change the narrative perspective (do not introduce 'we/our/I' if absent in USER_TEXT).",
+            "Do NOT add new facts, new claims, new citations, new numbers, or new named entities.",
+            "CRITICAL: do NOT introduce any digits (0-9) or year-like citations in rewrites unless they already appear in USER_TEXT. When borrowing scaffold phrases, exclude author/year parts and keep it generic.",
+            "Only cite from the provided excerpts C1..Ck; do not invent sources.",
+            "WHITE-BOX REQUIREMENT: every diagnosis item must be supported by at least one evidence quote copied verbatim from the provided excerpts.",
+            "Return exactly 3 diagnosis items: what is not exemplar-like + how to adjust to match exemplars, each with evidence. Prefer at least 2 items about sentence structure/phrasing patterns (not just word choice).",
+            "DIAGNOSIS MUST BE ACTIONABLE: avoid vague advice like “use academic language”. Each suggestion must include 1-2 concrete scaffold phrases (3-12 words) that appear verbatim in the evidence quote, and explain how to use them (no author names/years unless already in USER_TEXT).",
+            "SUGGESTION FORMAT (required): start suggestion with `Scaffold: \"...\"` (copy a reusable scaffold phrase from evidence), then explain the rewrite move in 1 sentence.",
+            "Return exactly TWO rewrites: one with level='light' and one with level='medium'.",
+            "Light: minimal wording/flow edits. Medium: more rephrasing to match exemplar tone, still preserve meaning.",
+            "REWRITE MUST SHOW STYLE ALIGNMENT: each rewrite must incorporate at least ONE scaffold phrase borrowed from the exemplars (generic phrasing only; do not copy author names/years).",
+            "For citations/evidence: quote MUST be an exact substring from the corresponding exemplar text.",
+            "EVIDENCE QUOTE QUALITY: keep each quote short (<= 180 chars), and prefer quoting the generic scaffold snippet only (avoid author/year/digits when possible).",
+            "CITATIONS ARE REQUIRED: every diagnosis item must include evidence; every rewrite variant must include 1-4 citations.",
+            "STRICTNESS: output must be valid JSON (no markdown). Ensure brackets/quotes are closed; do not include raw newlines inside JSON strings (replace line breaks with spaces).",
+            "CONCISENESS: keep title <= 12 words, problem/suggestion <= 2 sentences, changes <= 8 bullets total, each <= 18 words.",
+            "LANGUAGE: follow LANGUAGE_HINT strictly; write diagnosis + rewrites in the same language as USER_TEXT (zh/en/mixed).",
+            "Return STRICT JSON only (no markdown), matching the schema described.",
+        ]
     schema = {
         "language": "zh|en|mixed",
         "diagnosis": [

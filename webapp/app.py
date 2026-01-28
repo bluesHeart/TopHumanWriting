@@ -11,7 +11,7 @@ import traceback
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -691,16 +691,23 @@ class LLMApiManager:
         status, resp = client.chat(
             messages=[
                 {"role": "system", "content": "Return STRICT JSON only."},
-                {"role": "user", "content": "{\"ok\": true}"},
+                {"role": "user", "content": "Return exactly this JSON object and nothing else: {\"ok\": true}"},
             ],
             temperature=0.0,
-            max_tokens=32,
+            max_tokens=256,
             response_format={"type": "json_object"},
             timeout_s=30.0,
         )
         content = extract_first_content(resp)
+        parsed = None
+        try:
+            parsed = extract_json(content)
+        except Exception:
+            parsed = None
         error = ""
-        if int(status or 0) != 200:
+        ok_http = bool(int(status or 0) == 200)
+        ok_json = bool(isinstance(parsed, dict) and bool(parsed.get("ok")))
+        if not ok_http:
             try:
                 if isinstance(resp, dict):
                     if isinstance(resp.get("error", None), dict):
@@ -709,14 +716,27 @@ class LLMApiManager:
                         error = str(resp.get("_raw", "") or resp.get("_error", "") or "").strip()
             except Exception:
                 error = ""
+        elif not ok_json:
+            error = "response is not strict JSON (or JSON missing ok=true)"
         if error and len(error) > 500:
             error = error[:500] + "…"
+
+        preview = ""
+        try:
+            if isinstance(parsed, dict) and parsed:
+                import json as _json
+
+                preview = _json.dumps(parsed, ensure_ascii=False)[:200]
+            else:
+                preview = (content[:200] + "…") if len(content) > 200 else content
+        except Exception:
+            preview = (content[:200] + "…") if len(content) > 200 else content
         return {
-            "ok": bool(int(status or 0) == 200),
+            "ok": bool(ok_http and ok_json),
             "http": int(status or 0),
             "base_url": cfg.base_url_v1,
             "model": cfg.model,
-            "content_preview": (content[:200] + "…") if len(content) > 200 else content,
+            "content_preview": preview,
             "error": error,
         }
 
@@ -746,6 +766,36 @@ def create_app() -> FastAPI:
     llm = LLMManager(data_dir=get_settings_dir())
     llm_api = LLMApiManager(settings=settings)
     clients = ClientRegistry()
+
+    def _resolve_pdf_import_root(library_name: str) -> str:
+        slug = _library_slug(library_manager, library_name)
+        slug = (slug or "").strip()
+        if not slug:
+            return ""
+        base = os.path.join(get_settings_dir(), "pdfs", slug)
+        try:
+            os.makedirs(base, exist_ok=True)
+        except Exception:
+            pass
+        return base
+
+    def _safe_rel_path(raw_name: str) -> str:
+        name = (raw_name or "").replace("\\", "/").strip()
+        # Keep only relative paths
+        while name.startswith("/"):
+            name = name[1:]
+        name = name.replace(":", "")
+        parts = []
+        for part in name.split("/"):
+            part = (part or "").strip()
+            if not part or part in (".", ".."):
+                continue
+            # Avoid weird control chars
+            part = "".join(ch for ch in part if ch >= " " and ch not in "<>:\"|?*")
+            if not part:
+                continue
+            parts.append(part)
+        return "/".join(parts)
 
     try:
         app.state.tasks = tasks
@@ -1019,8 +1069,10 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
         pdf_folder = (payload.get("folder", "") or "").strip()
         if not library_name:
             raise HTTPException(status_code=400, detail="library required")
+        if not pdf_folder:
+            pdf_folder = _resolve_pdf_import_root(library_name)
         if not pdf_folder or not os.path.exists(pdf_folder):
-            raise HTTPException(status_code=400, detail="folder not found")
+            raise HTTPException(status_code=400, detail="folder not found (import PDFs first, or paste a valid path)")
 
         ts = tasks.create()
         cancel_event = tasks.cancel_event(ts.id)
@@ -1067,6 +1119,89 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
 
         threading.Thread(target=worker, daemon=True).start()
         return {"task_id": ts.id}
+
+    @app.get("/api/library/pdf_root")
+    def library_pdf_root(library: str):
+        library = (library or "").strip()
+        if not library:
+            raise HTTPException(status_code=400, detail="library required")
+        root = _resolve_pdf_import_root(library)
+        count = 0
+        try:
+            for dp, _, files in os.walk(root):
+                for f in files:
+                    if str(f).lower().endswith(".pdf"):
+                        count += 1
+        except Exception:
+            count = 0
+        return {"library": library, "pdf_root": root, "pdf_count": count}
+
+    @app.post("/api/library/import/clear")
+    def library_import_clear(payload: dict = Body(...)):
+        library = (payload.get("library", "") or "").strip()
+        if not library:
+            raise HTTPException(status_code=400, detail="library required")
+        root = _resolve_pdf_import_root(library)
+        try:
+            if os.path.exists(root):
+                # Only delete within the import root
+                import shutil
+
+                shutil.rmtree(root)
+            os.makedirs(root, exist_ok=True)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"ok": True, "pdf_root": root}
+
+    @app.post("/api/library/upload_pdf")
+    async def library_upload_pdf(
+        library: str = Form(...),
+        file: UploadFile = File(...),
+        overwrite: int = Form(0),
+    ):
+        library = (library or "").strip()
+        if not library:
+            raise HTTPException(status_code=400, detail="library required")
+        if file is None:
+            raise HTTPException(status_code=400, detail="file required")
+        filename = _safe_rel_path(getattr(file, "filename", "") or "")
+        if not filename:
+            raise HTTPException(status_code=400, detail="bad filename")
+        if not filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="only .pdf allowed")
+
+        root = _resolve_pdf_import_root(library)
+        rel = filename.replace("\\", "/").lstrip("/")
+        full = os.path.normpath(os.path.join(root, rel))
+        try:
+            root_abs = os.path.abspath(root).lower()
+            full_abs = os.path.abspath(full).lower()
+            if not (full_abs == root_abs or full_abs.startswith(root_abs + os.sep.lower())):
+                raise HTTPException(status_code=400, detail="invalid path")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+        # Ensure parent directory exists
+        try:
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+        except Exception:
+            pass
+
+        if os.path.exists(full) and not bool(int(overwrite or 0)):
+            return {"ok": True, "skipped": True, "pdf_root": root, "rel": rel}
+
+        try:
+            with open(full, "wb") as f:
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"ok": True, "skipped": False, "pdf_root": root, "rel": rel}
 
     @app.get("/api/tasks/{task_id}")
     def get_task(task_id: str):
@@ -1278,6 +1413,8 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
                 txt = (getattr(node, "text", "") or "").strip()
             except Exception:
                 pdf, page, txt = "", 0, ""
+            if len(txt) > 650:
+                txt = txt[:650].rstrip() + "…"
             exemplars.append({"id": cid, "score": float(sc or 0.0), "pdf": pdf, "page": page, "text": txt})
             excerpt = f"[{pdf}#p{page}] {txt}"
             c_list.append((cid, excerpt))
@@ -1316,15 +1453,16 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
                 raise HTTPException(status_code=500, detail="failed to start llama-server")
 
         lang = LanguageDetector.detect(selected)
-        prompt = build_polish_prompt(selected_text=selected, citations=c_list, language=lang)
+        prompt = build_polish_prompt(selected_text=selected, citations=c_list, language=lang, compact=(provider == "api"))
         messages = [
             {"role": "system", "content": "Return STRICT JSON only."},
             {"role": "user", "content": prompt},
         ]
 
         temperature = float(payload.get("temperature", 0.0) or 0.0)
-        max_tokens_requested = int(payload.get("max_tokens", 900) or 900)
-        max_tokens = max(64, min(int(max_tokens_requested), 2048))
+        max_tokens_requested = int(payload.get("max_tokens", 650) or 650)
+        max_cap = 8192 if provider == "api" else 2048
+        max_tokens = max(64, min(int(max_tokens_requested), int(max_cap)))
         retries = int(payload.get("retries", 2) or 2)
         retries = max(0, min(retries, 3))
 
@@ -1371,13 +1509,17 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
             data = extract_json(content) if content else None
             if not isinstance(data, dict):
                 last_err = "bad json"
-                # If the user requested a very small output budget, the model can get truncated.
-                # Auto-increase a bit to avoid a frustrating "bad json" loop.
-                if max_tokens < 900:
-                    if attempt <= 1:
-                        max_tokens = min(2048, max(600, max_tokens * 2))
-                    else:
-                        max_tokens = min(2048, 900)
+                # If the user requested a small output budget, the model can get truncated.
+                # Auto-increase to avoid a frustrating "bad json" loop.
+                if provider == "api":
+                    if max_tokens < 4096:
+                        max_tokens = min(max_cap, max(4096, max_tokens * 2))
+                else:
+                    if max_tokens < 900:
+                        if attempt <= 1:
+                            max_tokens = min(2048, max(600, max_tokens * 2))
+                        else:
+                            max_tokens = min(2048, 900)
                 continue
             try:
                 parsed = validate_polish_json(
@@ -1444,6 +1586,39 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
             ],
         }
         out["llm"] = used_llm
+
+        # Optional: compute alignment score before/after (white-box, no LLM).
+        try:
+            def _score_pack(query: str) -> dict:
+                rs = rag.search(library_name=library_name, query=query, top_k=3)
+                ex2 = []
+                best = None
+                for sc, node in (rs or [])[:3]:
+                    try:
+                        pdf = getattr(node, "pdf", "") or ""
+                        page = int(getattr(node, "page", 0) or 0)
+                        txt = (getattr(node, "text", "") or "").strip()
+                    except Exception:
+                        pdf, page, txt = "", 0, ""
+                    ex2.append({"score": float(sc or 0.0), "pdf": pdf, "page": page, "text": txt})
+                    if best is None:
+                        best = ex2[-1]
+                best_score = float((best or {}).get("score", 0.0) or 0.0)
+                pct = int(max(0.0, min(1.0, best_score)) * 100)
+                return {"score": best_score, "pct": pct, "best": best or {}, "exemplars": ex2}
+
+            alignment = {"selected": _score_pack(selected), "variants": []}
+            for v in out["result"].get("variants", []) or []:
+                lvl = str(v.get("level", "") or "").strip().lower()
+                rw = str(v.get("rewrite", "") or "").strip()
+                if not rw:
+                    continue
+                pack = _score_pack(rw)
+                pack["level"] = lvl or "unknown"
+                alignment["variants"].append(pack)
+            out["alignment"] = alignment
+        except Exception:
+            pass
         return out
 
     @app.post("/api/library/open_pdf")

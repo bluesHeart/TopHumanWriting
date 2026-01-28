@@ -17,10 +17,11 @@
     lastCite: null,
     llm: null,
     llmApi: null,
-    buildTaskId: null,
+    buildTaskId: localStorage.getItem("aiw.buildTaskId") || "",
     buildPollTimer: null,
-    citeTaskId: null,
+    citeTaskId: localStorage.getItem("aiw.citeTaskId") || "",
     citePollTimer: null,
+    pdfFolder: localStorage.getItem("aiw.pdfFolder") || "",
     polishDraft: localStorage.getItem("aiw.polishDraft") || "",
     clientId: sessionStorage.getItem("aiw.clientId") || "",
     clientHeartbeatTimer: null,
@@ -84,6 +85,22 @@
 
   const apiGet = (url) => api("GET", url);
   const apiPost = (url, body) => api("POST", url, body);
+
+  async function apiFormPost(url, form) {
+    const resp = await fetch(url, { method: "POST", body: form });
+    let data = null;
+    try {
+      data = await resp.json();
+    } catch {
+      data = null;
+    }
+    if (!resp.ok) {
+      const detail =
+        data && typeof data === "object" && data.detail ? String(data.detail) : `${resp.status} ${resp.statusText}`;
+      throw new Error(detail);
+    }
+    return data;
+  }
 
   function newClientId() {
     try {
@@ -460,8 +477,8 @@
   }
 
   function pageLibrary() {
-    renderHeader("文献库", "先建库：PDF 文件夹 → 向量索引（FAISS）→ 范文可检索。");
-    const root = el("div", { class: "grid", style: "gap:14px" });
+    renderHeader("文献库", "导入同领域顶级 PDF → 建索引（FAISS/LlamaIndex）→ 用于白箱对齐写作。");
+    const root = el("div", { class: "grid", style: "gap:18px" });
 
     const createName = el("input", { class: "input", placeholder: "新建库名（例如：finance_2026）", style: "flex:1; min-width:320px" });
     const createBtn = el(
@@ -485,24 +502,154 @@
       "创建文献库"
     );
 
-    const folderInput = el("input", { class: "input", placeholder: "PDF 文件夹路径（支持递归）", style: "flex:1; min-width:360px" });
+    // Browser-native folder picker (no PowerShell / no tkinter).
+    const pdfInput = el("input", { type: "file", multiple: true, accept: ".pdf,application/pdf", style: "display:none" });
+    pdfInput.setAttribute("webkitdirectory", "");
+    pdfInput.setAttribute("directory", "");
+
+    let selectedFiles = [];
+    const selectedInfo = el("div", { class: "muted mono" }, "未选择文件夹。");
+    const importProgressBar = el("div", { class: "progress" }, el("div"));
+    const importProgressText = el("div", { class: "muted mono" }, "—");
+
+    function fmtCount(n) {
+      const x = Number(n || 0);
+      if (!Number.isFinite(x)) return "0";
+      return String(Math.max(0, Math.round(x)));
+    }
+
+    function updateSelectedInfo() {
+      const pdfs = selectedFiles.filter((f) => String(f && f.name ? f.name : "").toLowerCase().endsWith(".pdf"));
+      if (!pdfs.length) {
+        selectedInfo.textContent = "未选择文件夹。";
+        return;
+      }
+      const rel0 = String(pdfs[0].webkitRelativePath || pdfs[0].name || "");
+      const folder = rel0.includes("/") ? rel0.split("/")[0] : "PDF_Folder";
+      selectedInfo.textContent = `已选择：${fmtCount(pdfs.length)} 个 PDF · 文件夹：${folder}`;
+    }
+
+    pdfInput.addEventListener("change", () => {
+      selectedFiles = Array.from(pdfInput.files || []);
+      updateSelectedInfo();
+      if (selectedFiles.length) toast("已选择文件夹（待导入）。");
+    });
+
     const pickBtn = el(
       "button",
       {
         class: "btn",
         type: "button",
+        onclick: () => pdfInput.click(),
+      },
+      "选择 PDF 文件夹…"
+    );
+
+    const clearImportBtn = el(
+      "button",
+      {
+        class: "btn btn-danger btn-small",
+        type: "button",
         onclick: async () => {
+          if (!state.library) return toast("请先选择文献库。", "bad");
+          const ok = window.confirm("确定清空此库已导入的 PDF 吗？\n\n这不会删除你的原始文件夹，只会清空 TopHumanWriting_data 里的拷贝。");
+          if (!ok) return;
           try {
-            const r = await apiPost("/api/dialog/pick_folder", {});
-            folderInput.value = (r && r.folder) || "";
-            if (folderInput.value) toast("已选择文件夹。");
-            else toast("未选择文件夹（也可手动粘贴路径）。", "bad");
+            await apiPost("/api/library/import/clear", { library: state.library });
+            await syncPdfRoot();
+            toast("已清空导入的 PDF。");
           } catch (e) {
-            toast(String(e.message || e), "bad");
+            toast(String(e.message || e), "bad", 6500);
           }
         },
       },
-      "选择 PDF 文件夹…"
+      "清空已导入"
+    );
+
+    async function syncPdfRoot() {
+      if (!state.library) {
+        state.pdfFolder = "";
+        localStorage.setItem("aiw.pdfFolder", "");
+        return null;
+      }
+      try {
+        const r = await apiGet(`/api/library/pdf_root?library=${encodeURIComponent(state.library)}`);
+        state.pdfFolder = (r && r.pdf_root) || "";
+        localStorage.setItem("aiw.pdfFolder", state.pdfFolder || "");
+        const n = (r && r.pdf_count) != null ? Number(r.pdf_count) : null;
+        if (state.pdfFolder) {
+          importProgressText.textContent = `已导入：${n == null ? "—" : fmtCount(n)} 个 PDF · 存储：${state.pdfFolder}`;
+        }
+        return r || null;
+      } catch {
+        // ignore
+        return null;
+      }
+    }
+
+    const importBtn = el(
+      "button",
+      {
+        class: "btn btn-primary",
+        type: "button",
+        onclick: async () => {
+          if (!state.library) return toast("请先选择文献库。", "bad");
+          const pdfs = selectedFiles.filter((f) => String(f && f.name ? f.name : "").toLowerCase().endsWith(".pdf"));
+          if (!pdfs.length) return toast("请先选择包含 PDF 的文件夹。", "bad");
+
+          importBtn.disabled = true;
+          pickBtn.disabled = true;
+          clearImportBtn.disabled = true;
+          let canceled = false;
+          const cancelBtn = el(
+            "button",
+            {
+              class: "btn btn-danger btn-small",
+              type: "button",
+              onclick: () => {
+                canceled = true;
+                toast("已请求取消导入（会在当前文件完成后停止）。", "bad");
+              },
+            },
+            "取消导入"
+          );
+          importBtn.parentElement && importBtn.parentElement.appendChild(cancelBtn);
+
+          try {
+            importProgressBar.firstChild.style.width = "0%";
+            importProgressText.textContent = `导入中… 0/${fmtCount(pdfs.length)}`;
+
+            for (let i = 0; i < pdfs.length; i++) {
+              if (canceled) break;
+              const f = pdfs[i];
+              const rel = String(f.webkitRelativePath || f.name || "");
+              importProgressText.textContent = `导入中… ${fmtCount(i + 1)}/${fmtCount(pdfs.length)} · ${rel}`;
+              importProgressBar.firstChild.style.width = `${Math.round(((i + 1) / pdfs.length) * 100)}%`;
+
+              const fd = new FormData();
+              fd.append("library", state.library);
+              fd.append("overwrite", "0");
+              fd.append("file", f, rel || f.name || `file_${i + 1}.pdf`);
+              await apiFormPost("/api/library/upload_pdf", fd);
+            }
+
+            await syncPdfRoot();
+            if (canceled) toast("导入已取消（部分文件可能已导入）。", "bad", 4500);
+            else toast("导入完成。");
+          } catch (e) {
+            await syncPdfRoot().catch(() => {});
+            toast("导入失败：" + String(e.message || e), "bad", 6500);
+          } finally {
+            importBtn.disabled = false;
+            pickBtn.disabled = false;
+            clearImportBtn.disabled = false;
+            try {
+              cancelBtn.remove();
+            } catch {}
+          }
+        },
+      },
+      "导入到本地库"
     );
 
     const buildBtn = el(
@@ -512,11 +659,13 @@
         type: "button",
         onclick: async () => {
           if (!state.library) return toast("请先选择文献库。", "bad");
-          const folder = (folderInput.value || "").trim();
-          if (!folder) return toast("请先选择 PDF 文件夹。", "bad");
+          const r0 = await syncPdfRoot().catch(() => null);
+          const n0 = r0 && r0.pdf_count != null ? Number(r0.pdf_count) : null;
+          if (n0 !== null && n0 <= 0) return toast("此库还没有导入 PDF。请先“选择 PDF 文件夹 → 导入到本地库”。", "bad");
           try {
-            const r = await apiPost("/api/library/build", { library: state.library, folder });
+            const r = await apiPost("/api/library/build", { library: state.library, folder: state.pdfFolder || "" });
             state.buildTaskId = r.task_id;
+            localStorage.setItem("aiw.buildTaskId", state.buildTaskId || "");
             startBuildPolling();
             toast("已开始建库（后台进行）。");
           } catch (e) {
@@ -567,6 +716,8 @@
         updateProgressUI(t);
         if (t.status !== "running") {
           stopBuildPolling();
+          state.buildTaskId = "";
+          localStorage.setItem("aiw.buildTaskId", "");
           await refreshLibraryStatus();
           if (t.status === "done") toast("建库完成。");
           else if (t.status === "canceled") toast("建库已取消。", "bad");
@@ -603,21 +754,39 @@
       el(
         "div",
         { class: "card" },
-        el("div", { class: "label" }, "PDF → 索引（FAISS）"),
-        el("div", { class: "row" }, folderInput, pickBtn),
+        el("div", { class: "label" }, "导入 PDF（不会弹 PowerShell）"),
+        el("div", { class: "row" }, pickBtn, importBtn, clearImportBtn),
+        selectedInfo,
+        importProgressBar,
+        importProgressText,
+        el("div", { class: "muted" }, "说明：会把你选择的 PDF 拷贝进 TopHumanWriting_data/pdfs/（用于离线检索、打开来源）。")
+      )
+    );
+
+    root.appendChild(
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "label" }, "建索引（FAISS）"),
         el("div", { class: "row" }, buildBtn, cancelBtn),
         progressBar,
         progressText,
-        el("div", { class: "muted" }, "提示：第一次建库会占用 CPU；完成后“对齐扫描/润色”才会有范文对照。")
+        el("div", { class: "muted" }, "提示：首次建库会占用 CPU；完成后“对齐扫描/润色/引用借鉴”才会有范文对照。")
       )
     );
+
+    root.appendChild(pdfInput);
+
+    // Initialize status when opening this page.
+    syncPdfRoot().catch(() => {});
+    if (state.buildTaskId) startBuildPolling();
 
     return root;
   }
 
   function pageScan() {
     renderHeader("对齐扫描", "先找出“最不像范文”的句子（向量检索，不用 LLM）。");
-    const root = el("div", { class: "grid", style: "gap:14px" });
+    const root = el("div", { class: "grid", style: "gap:18px" });
 
     const text = el("textarea", { class: "textarea", placeholder: "粘贴你的正文（中英混合可）…" });
     const topk = el("input", { class: "input", value: "6", style: "width:100px", inputmode: "numeric" });
@@ -712,31 +881,36 @@
       resultsBox.appendChild(list);
     }
 
+    const inputCard = el(
+      "div",
+      { class: "card" },
+      el("div", { class: "label" }, "输入文本"),
+      text,
+      el(
+        "div",
+        { class: "row" },
+        el("span", { class: "label" }, "top_k"),
+        topk,
+        el("span", { class: "label" }, "max_items"),
+        maxItems,
+        runBtn,
+        el("span", { class: "muted" }, "扫描仅做检索：不调用 LLM。")
+      )
+    );
     root.appendChild(
       el(
         "div",
-        { class: "card" },
-        el("div", { class: "label" }, "输入文本"),
-        text,
-        el(
-          "div",
-          { class: "row" },
-          el("span", { class: "label" }, "top_k"),
-          topk,
-          el("span", { class: "label" }, "max_items"),
-          maxItems,
-          runBtn,
-          el("span", { class: "muted" }, "扫描仅做检索：不调用 LLM。")
-        )
+        { class: "grid two", style: "gap:14px; align-items:start; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr)" },
+        inputCard,
+        resultsBox
       )
     );
-    root.appendChild(resultsBox);
     return root;
   }
 
   function pagePolish() {
     renderHeader("对齐润色", "白箱：范文对照 + 证据引用 + 受控改写（默认本地 Qwen，可切换 API）。");
-    const root = el("div", { class: "grid", style: "gap:14px" });
+    const root = el("div", { class: "grid", style: "gap:18px" });
 
     const selected = el("textarea", { class: "textarea", placeholder: "选中要润色的句子/段落…" });
     selected.value = state.polishDraft || "";
@@ -746,7 +920,7 @@
     });
 
     const topk = el("input", { class: "input", value: "8", style: "width:110px", inputmode: "numeric", title: "检索多少条范文片段作为证据（C1..Ck）" });
-    const maxTok = el("input", { class: "input", value: "900", style: "width:120px", inputmode: "numeric", title: "输出长度上限（越大越慢）" });
+    const maxTok = el("input", { class: "input", value: "650", style: "width:120px", inputmode: "numeric", title: "输出长度上限（越大越慢）" });
 
     const providerSel = el(
       "select",
@@ -819,6 +993,61 @@
         outBox.appendChild(el("div", { class: "muted" }, `LLM：${mp ? mp.split(/[\\\\/]/).pop() : "—"}（llama.cpp）`));
       } else if (state.llm && state.llm.model_path) {
         outBox.appendChild(el("div", { class: "muted" }, `LLM：${String(state.llm.model_path).split(/[\\\\/]/).pop()}（llama.cpp）`));
+      }
+
+      // White-box alignment score before/after (retrieval-only, no LLM).
+      const al = (r && r.alignment) || null;
+      if (al && al.selected) {
+        const rows = [];
+        rows.push({ name: "原文", pack: al.selected });
+        const vs = Array.isArray(al.variants) ? al.variants : [];
+        for (const v of vs) {
+          const lvl = String(v.level || "").toLowerCase();
+          const name = lvl === "light" ? "轻改" : lvl === "medium" ? "中改" : lvl || "改写";
+          rows.push({ name, pack: v });
+        }
+
+        const wrap = el("div", { class: "list" });
+        for (const it of rows) {
+          const pack = it.pack || {};
+          const pct = Number(pack.pct || 0);
+          const badgeCls = pct >= 80 ? "badge good" : pct >= 60 ? "badge" : "badge bad";
+          const best = pack.best || {};
+          const bestText = best && best.pdf ? `${best.pdf}#p${best.page || 0}` : "—";
+          const exs = Array.isArray(pack.exemplars) ? pack.exemplars : [];
+          wrap.appendChild(
+            el(
+              "div",
+              { class: "item" },
+              el(
+                "div",
+                { class: "item-header" },
+                el("div", null, el("span", { class: badgeCls }, `${Math.round(pct)}%`), " ", el("span", null, `${it.name} 对齐度`)),
+                el(
+                  "div",
+                  { class: "row" },
+                  el("span", { class: "muted mono" }, bestText),
+                  exs.length
+                    ? el(
+                        "button",
+                        {
+                          class: "btn btn-small",
+                          type: "button",
+                          onclick: () => openModal(`${it.name} · 对齐范文（Top-K）`, exemplarList(exs, { library: state.library })),
+                        },
+                        "查看范文"
+                      )
+                    : null
+                )
+              )
+            )
+          );
+        }
+
+        outBox.appendChild(el("div", { class: "hr" }));
+        outBox.appendChild(el("div", { class: "label" }, "对齐度（检索得分，越高越像范文）"));
+        outBox.appendChild(el("div", { class: "muted" }, "说明：该分数来自向量检索（不调用 LLM），用于量化“改写后是否更像范文”。"));
+        outBox.appendChild(wrap);
       }
 
       if (diag.length) {
@@ -924,23 +1153,26 @@
           const txt = (selected.value || "").trim();
           if (txt.length < 8) return toast("选中文本太短。", "bad");
 
-          let maxTokens = Number(maxTok.value || 900);
-          if (!Number.isFinite(maxTokens) || maxTokens <= 0) maxTokens = 900;
-          maxTokens = Math.max(64, Math.min(2048, Math.round(maxTokens)));
+          const provider = providerSel.value || localStorage.getItem("aiw.llmProvider") || "local";
+
+          let maxTokens = Number(maxTok.value || 650);
+          if (!Number.isFinite(maxTokens) || maxTokens <= 0) maxTokens = 650;
+          const cap = provider === "api" ? 8192 : 2048;
+          maxTokens = Math.max(64, Math.min(cap, Math.round(maxTokens)));
           if (maxTokens < 256) {
             maxTokens = 256;
             maxTok.value = String(maxTokens);
           }
-          if (maxTokens < 600) {
-            toast("输出长度太小可能导致生成失败（JSON 被截断）。建议 ≥ 900。", "bad", 4500);
+          if (provider === "api") {
+            if (maxTokens < 1200) toast("API 模型可能需要更大输出长度（建议 ≥ 4096）以避免 JSON 被截断。", "bad", 4500);
+          } else {
+            if (maxTokens < 450) toast("输出长度太小可能导致生成失败（JSON 被截断）。建议 ≥ 650。", "bad", 4500);
           }
 
           genBtn.disabled = true;
-          const provider = providerSel.value || localStorage.getItem("aiw.llmProvider") || "local";
           genBtn.textContent = provider === "api" ? "生成中…（API 请求中）" : "生成中…（首次会加载模型）";
           try {
             await refreshLLMStatus();
-            const provider = providerSel.value || localStorage.getItem("aiw.llmProvider") || "local";
             const r = await apiPost("/api/align/polish", {
               library: state.library,
               selected_text: txt,
@@ -958,7 +1190,8 @@
             await refreshLLMStatus().catch(() => {});
             let msg = String(e && (e.message || e) ? e.message || e : e);
             if (msg.includes("LLM output invalid") && msg.includes("bad json")) {
-              msg = "生成结果格式不完整（常见原因：输出长度太小）。请打开“高级设置”，把输出长度调大（建议 900）后重试。";
+              msg =
+                "生成结果格式不完整（常见原因：输出长度太小或 API 推理占用大量 tokens）。请打开“高级设置”，把输出长度调大（本地建议 ≥ 650；API 建议 ≥ 4096）后重试。";
             } else if (msg.includes("failed to start llama-server")) {
               msg = "启动本地模型失败：请到“LLM 设置”页点击“一键启动&测试”。";
             } else if (msg.includes("missing api key")) {
@@ -999,34 +1232,38 @@
       advOpen ? "收起高级" : "高级设置"
     );
 
-    root.appendChild(
+    const inputCard = el(
+      "div",
+      { class: "card" },
+      el("div", { class: "label" }, "选中要润色的文本"),
+      selected,
       el(
         "div",
-        { class: "card" },
-        el("div", { class: "label" }, "选中要润色的文本"),
-        selected,
-        el(
-          "div",
-          { class: "row" },
-          el("span", { class: "label" }, "范文数量"),
-          topk,
-          exBtn,
-          genBtn,
-          advBtn
-        ),
-        advRow,
-        el("div", { class: "muted" }, "提示：先“获取范文对照”再生成，能更清楚看到 C1..Ck 是哪些证据。")
-      )
+        { class: "row" },
+        el("span", { class: "label" }, "范文数量"),
+        topk,
+        exBtn,
+        genBtn,
+        advBtn
+      ),
+      advRow,
+      el("div", { class: "muted" }, "提示：先“获取范文对照”再生成，能更清楚看到 C1..Ck 是哪些证据。")
     );
 
-    root.appendChild(exemplarsBox);
+    const topGrid = el(
+      "div",
+      { class: "grid two", style: "gap:14px; align-items:start; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr)" },
+      inputCard,
+      exemplarsBox
+    );
+    root.appendChild(topGrid);
     root.appendChild(outBox);
     return root;
   }
 
   function pageCite() {
     renderHeader("引用借鉴", "抽取“引用句子 + References”，构建可检索的范文句式库（白箱）。");
-    const root = el("div", { class: "grid", style: "gap:14px" });
+    const root = el("div", { class: "grid", style: "gap:18px" });
 
     const statusBox = el("div", { class: "card" }, el("div", { class: "muted" }, "正在读取引用库状态…"));
 
@@ -1082,6 +1319,7 @@
             if (mp > 0) body.max_pages = mp;
             const r = await apiPost("/api/cite/build", body);
             state.citeTaskId = r.task_id;
+            localStorage.setItem("aiw.citeTaskId", state.citeTaskId || "");
             startCitePolling();
             toast("已开始抽取引用句子（后台进行）。");
           } catch (e) {
@@ -1135,6 +1373,8 @@
         updateCiteProgressUI(t);
         if (t.status !== "running") {
           stopCitePolling();
+          state.citeTaskId = "";
+          localStorage.setItem("aiw.citeTaskId", "");
           await refreshLibraryStatus();
           await syncStatus();
           if (t.status === "done") toast("引用库构建完成。");
@@ -1315,12 +1555,13 @@
     root.appendChild(resultsBox);
 
     syncStatus().catch(() => {});
+    if (state.citeTaskId) startCitePolling();
     return root;
   }
 
   function pageLLM() {
     renderHeader("LLM 设置", "支持：本地 llama.cpp（离线） / OpenAI-compatible API（可选）。");
-    const root = el("div", { class: "grid", style: "gap:14px" });
+    const root = el("div", { class: "grid", style: "gap:18px" });
 
     const providerSel = el(
       "select",
@@ -1633,7 +1874,7 @@
     renderHeader("使用帮助", "你要的是“像范文写法”的白箱过程：有范文背书，改法可追溯。");
     return el(
       "div",
-      { class: "grid", style: "gap:14px" },
+      { class: "grid", style: "gap:18px" },
       el(
         "div",
         { class: "card" },
@@ -1641,7 +1882,7 @@
         el(
           "ol",
           null,
-          el("li", null, "文献库页：创建库 → 选择 PDF 文件夹 → 开始建库（等待完成）。"),
+          el("li", null, "文献库页：创建库 → 选择 PDF 文件夹 → 导入到本地库 → 开始建库（等待完成）。"),
           el("li", null, "对齐扫描页：粘贴正文 → 扫描 → 找到对齐度低的句子。"),
           el("li", null, "对齐润色页：点击“润色这个句子”或粘贴段落 → 获取范文对照 → 生成对齐润色。")
         )
@@ -1652,7 +1893,7 @@
         el("div", { class: "label" }, "Qwen 的作用在哪里？"),
         el("div", null, "扫描：只用向量检索（FAISS），不调用 LLM。"),
         el("div", null, "润色：默认调用本地 Qwen（llama.cpp）输出 JSON（诊断 + 轻改/中改 + 引用证据）。也可切换到大模型 API（OpenAI 兼容）。"),
-        el("div", { class: "muted" }, "如何确认：对齐润色结果顶部会显示“LLM：…”（本地模型文件名或 API 的 model/base_url）。")
+        el("div", { class: "muted" }, "如何确认：对齐润色结果顶部会显示“LLM：…”；并展示“对齐度（检索得分）”对比原文/轻改/中改。")
       )
     );
   }
