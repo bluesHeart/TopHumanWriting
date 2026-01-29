@@ -187,15 +187,30 @@
           barInner.style.width = `${Math.floor(pct)}%`;
         }, 160);
 
-        async function probe(h, p) {
-          try {
-            const resp = await fetch(`http://${h}:${p}/api/health?ts=${Date.now()}`, { mode: "cors", cache: "no-store" });
-            if (!resp.ok) return false;
-            const data = await resp.json().catch(() => null);
-            return !!(data && data.ok);
-          } catch {
-            return false;
-          }
+        // NOTE: This page is opened via file:// (pythonw launch). Fetch would be blocked by CORS (Origin: null).
+        // Use an <img> probe instead (no CORS) to detect whether the local server is up.
+        function probe(h, p) {
+          return new Promise((resolve) => {
+            const img = new Image();
+            let done = false;
+            const timer = window.setTimeout(() => finish(false), 650);
+
+            function finish(ok) {
+              if (done) return;
+              done = true;
+              window.clearTimeout(timer);
+              try {
+                img.onload = null;
+                img.onerror = null;
+              } catch {}
+              resolve(!!ok);
+            }
+
+            img.onload = () => finish(true);
+            img.onerror = () => finish(false);
+            img.referrerPolicy = "no-referrer";
+            img.src = `http://${h}:${p}/static/favicon.svg?ts=${Date.now()}`;
+          });
         }
 
         async function loop() {
@@ -219,7 +234,7 @@
           window.clearInterval(tick);
           barInner.style.width = "100%";
           statusText.textContent = "启动超时：可能被防火墙/杀软拦截，或端口被占用。";
-          tipText.textContent = "可尝试：重新运行 start_web.vbs；或用 run_web.bat 查看报错；或打开启动日志。";
+          tipText.textContent = "可尝试：重新运行 TopHumanWriting.vbs；或用 run_web.bat 查看报错；或打开启动日志。";
         }
 
         loop();

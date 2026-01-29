@@ -354,10 +354,20 @@
     let currentTaskId = "";
     let pollTimer = null;
 
-    const pdfInput = el("input", { type: "file", multiple: true, accept: ".pdf,application/pdf", style: "display:none" });
+    const pdfInput = el("input", {
+      type: "file",
+      multiple: true,
+      accept: ".pdf,application/pdf",
+      style: "position:fixed; left:-10000px; top:0; width:1px; height:1px; opacity:0",
+    });
     pdfInput.setAttribute("webkitdirectory", "");
     pdfInput.setAttribute("directory", "");
-    const pdfInputFiles = el("input", { type: "file", multiple: true, accept: ".pdf,application/pdf", style: "display:none" });
+    const pdfInputFiles = el("input", {
+      type: "file",
+      multiple: true,
+      accept: ".pdf,application/pdf",
+      style: "position:fixed; left:-10000px; top:0; width:1px; height:1px; opacity:0",
+    });
 
     function fmtCount(n) {
       const x = Number(n || 0);
@@ -1292,7 +1302,7 @@
     "This paper studies how risk premia vary with market conditions. We document strong cross-sectional dispersion and show that a parsimonious factor model explains most of the variation.";
 
   function pageHome() {
-    renderHeader("开始", "把你的段落写得更像顶级范文：先对照证据，再受控改写（白箱可追溯）。");
+    renderHeader("开始", "像专题库一样写作：选择同领域范文库 → 对照证据 → 受控改写（每条建议都有范文背书）。");
 
     const root = el("div", { class: "home" });
     const inner = el("div", { class: "home-inner" });
@@ -1301,56 +1311,27 @@
       "div",
       { class: "home-hero" },
       el("div", { class: "home-title" }, "TopHumanWriting"),
-      el("div", { class: "home-sub" }, "模仿同领域顶级人类范文写法 · 避免 AI 味 · 证据可追溯"),
+      el("div", { class: "home-sub" }, "模仿同领域顶级人类范文写法 · 避免 AI 味 · 每条建议都引用本次用到的范文证据"),
       el(
         "div",
         { class: "home-kicker" },
-        "三步上手：① 准备范文库（只做一次）② 粘贴段落 ③ 找差距 / 模仿改写（每条建议都有范文证据背书）。"
+        "建议：先准备一次范文库（50–100 篇 PDF）。之后写作只做“对照 + 受控改写”。"
       )
     );
 
     const modeKey = "aiw.homeMode";
-    const savedMode = localStorage.getItem(modeKey) || "scan";
-    let mode = savedMode === "polish" || savedMode === "cite" ? savedMode : "scan";
+    const savedMode = localStorage.getItem(modeKey) || "polish";
+    let mode = savedMode === "scan" || savedMode === "polish" || savedMode === "cite" ? savedMode : "polish";
 
     const text = el("textarea", { class: "textarea home-textarea", placeholder: "粘贴你要改的句子/段落（中英混合可）…" });
     const homeDraftKey = "aiw.homeDraft";
     text.value = localStorage.getItem(homeDraftKey) || "";
     text.addEventListener("input", () => localStorage.setItem(homeDraftKey, text.value || ""));
 
-    function modeChip(id, label, desc) {
-      const b = el(
-        "button",
-        {
-          class: "pill",
-          type: "button",
-          "data-mode": id,
-          onclick: () => {
-            mode = id;
-            localStorage.setItem(modeKey, mode);
-            renderModeUI();
-            renderStatus();
-          },
-        },
-        label
-      );
-      b.title = desc || "";
-      return b;
-    }
-
-    const modeRow = el(
-      "div",
-      { class: "home-modes" },
-      modeChip("scan", "🧭 找差距（哪里不像）", "只做范文对照，找出最不像范文的句子"),
-      modeChip("polish", "✨ 模仿改写（更像范文）", "白箱输出：诊断 + 可选改法 + 范文证据"),
-      modeChip("cite", "🔖 引用写法（可借鉴）", "检索范文里的引用表达与参考文献")
-    );
-
-    const hint = el("div", { class: "home-hint" });
-    const primaryBtn = el("button", { class: "btn btn-primary home-primary", type: "button" }, "开始");
-    const secondaryBtn = el("button", { class: "btn home-secondary", type: "button" }, "准备范文库…");
     const sampleBtn = el("button", { class: "btn btn-ghost", type: "button" }, "填入示例");
     const clearBtn = el("button", { class: "btn btn-ghost", type: "button" }, "清空");
+    const helpBtn = el("button", { class: "btn btn-ghost", type: "button" }, "新手教程");
+    const prepBtn = el("button", { class: "btn", type: "button" }, "准备/更新范文库…");
 
     sampleBtn.onclick = () => {
       text.value = HOME_SAMPLE_TEXT;
@@ -1366,9 +1347,28 @@
       toast("已清空。");
     };
 
-    secondaryBtn.onclick = () => openPrepWizard({ need: "rag" });
+    helpBtn.onclick = () => setRoute("help");
+    prepBtn.onclick = () => openPrepWizard({ need: "rag" });
 
-    primaryBtn.onclick = () => {
+    const toolCards = [];
+
+    function markToolActive() {
+      for (const it of toolCards) {
+        if (!it || !it.node) continue;
+        it.node.classList.toggle("active", it.id === mode);
+      }
+    }
+
+    function setMode(next) {
+      const m = String(next || "").trim().toLowerCase();
+      if (m !== "scan" && m !== "polish" && m !== "cite") return;
+      mode = m;
+      localStorage.setItem(modeKey, mode);
+      markToolActive();
+    }
+
+    function runTool(nextMode) {
+      setMode(nextMode);
       const raw = (text.value || "").trim();
       if (!raw) return toast("请先粘贴文本。", "bad");
 
@@ -1383,6 +1383,22 @@
         return setRoute("scan");
       }
       if (mode === "polish") {
+        const provider = localStorage.getItem("aiw.llmProvider") || "local";
+        if (provider === "api") {
+          const api = state.llmApi || {};
+          const ok = !!(api.api_key_present && String(api.base_url || "").trim() && String(api.model || "").trim());
+          if (!ok) {
+            toast("模仿改写需要模型：请先在“模型设置”里配置 API（或切回本地模型）。", "bad", 6500);
+            return setRoute("llm");
+          }
+        } else {
+          const ls = state.llm || {};
+          const ok = !!(ls.server_ok && ls.model_ok);
+          if (!ok) {
+            toast("模仿改写需要模型：请先在“模型设置”里安装本地模型。", "bad", 6500);
+            return setRoute("llm");
+          }
+        }
         state.polishDraft = raw;
         localStorage.setItem("aiw.polishDraft", state.polishDraft);
         if (!state.library || !(state.libraryStatus && state.libraryStatus.rag_index)) {
@@ -1401,18 +1417,111 @@
         localStorage.setItem("aiw.citeAutoRun", "1");
         return setRoute("cite");
       }
-    };
+    }
 
     text.addEventListener("keydown", (e) => {
       if (!e) return;
-      // Ctrl+Enter / Cmd+Enter to run.
+      // Ctrl+Enter / Cmd+Enter: run last selected tool.
       const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || "");
       const hot = isMac ? e.metaKey && e.key === "Enter" : e.ctrlKey && e.key === "Enter";
       if (hot) {
         e.preventDefault();
-        primaryBtn.click();
+        runTool(mode);
       }
     });
+
+    function toolCard(opts) {
+      const id = String(opts && opts.id ? opts.id : "").trim().toLowerCase();
+      const title = String(opts && opts.title ? opts.title : "").trim();
+      const subtitle = String(opts && opts.subtitle ? opts.subtitle : "").trim();
+      const icon = String(opts && opts.icon ? opts.icon : "").trim();
+      const primaryText = String(opts && opts.primaryText ? opts.primaryText : "").trim() || "开始";
+      const badges = Array.isArray(opts && opts.badges ? opts.badges : null) ? opts.badges : [];
+      const onRun = typeof opts.onRun === "function" ? opts.onRun : () => {};
+
+      const badgeRow = el("div", { class: "topic-badges" });
+      for (const b of badges) badgeRow.appendChild(el("span", { class: "badge" }, String(b)));
+
+      const btn = el(
+        "button",
+        {
+          class: "btn btn-primary",
+          type: "button",
+          onclick: (e) => {
+            try {
+              if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+            } catch {}
+            onRun();
+          },
+        },
+        primaryText
+      );
+
+      const card = el(
+        "div",
+        { class: "card topic-card tool-card" + (mode === id ? " active" : ""), "data-mode": id },
+        el(
+          "div",
+          { class: "topic-head" },
+          el("div", { class: "topic-icon big", "aria-hidden": "true" }, icon),
+          el("div", { class: "topic-meta" }, el("div", { class: "topic-name" }, title), el("div", { class: "topic-sub" }, subtitle))
+        ),
+        badgeRow,
+        el("div", { class: "topic-actions" }, btn, el("button", { class: "btn btn-ghost", type: "button", onclick: () => setRoute("help") }, "查看例子"))
+      );
+
+      card.addEventListener("click", () => setMode(id));
+      toolCards.push({ id, node: card });
+      return card;
+    }
+
+    const toolGrid = el(
+      "div",
+      { class: "topic-grid home-tools" },
+      toolCard({
+        id: "scan",
+        icon: "🧭",
+        title: "找差距（先定位哪里不像）",
+        subtitle: "把正文拆成句子，找出“最不像范文”的句子，并展示对应范文证据。",
+        badges: ["不生成内容", "有证据", "可追溯"],
+        primaryText: "开始找差距",
+        onRun: () => runTool("scan"),
+      }),
+      toolCard({
+        id: "polish",
+        icon: "✨",
+        title: "模仿改写（写得更像范文）",
+        subtitle: "基于范文证据做受控改写：哪里不像 + 句式模板 + 两种改法（保守/更像）。",
+        badges: ["两版改写", "低发散", "有证据"],
+        primaryText: "生成模仿改写",
+        onRun: () => runTool("polish"),
+      }),
+      toolCard({
+        id: "cite",
+        icon: "🔖",
+        title: "引用写法（可选）",
+        subtitle: "检索范文里常见的引用表达（正文引用 + 参考文献），可直接借鉴。",
+        badges: ["可选功能", "有证据"],
+        primaryText: "检索引用写法",
+        onRun: () => runTool("cite"),
+      })
+    );
+
+    const inputCard = el(
+      "div",
+      { class: "card home-card" },
+      el("div", { class: "label" }, "你的文本"),
+      text,
+      el("div", { class: "home-subactions" }, prepBtn, helpBtn, sampleBtn, clearBtn),
+      el("div", { class: "muted" }, "建议流程：先用“找差距”定位不一致，再用“模仿改写”更像范文。快捷键：Ctrl+Enter 运行你上次选中的工具。")
+    );
+
+    const toolPanel = el(
+      "div",
+      { class: "card home-card home-tools-card" },
+      el("div", { class: "label" }, "选择你要做什么"),
+      toolGrid
+    );
 
     const statusRow = el("div", { class: "home-status" });
 
@@ -1433,18 +1542,7 @@
 
       statusRow.appendChild(statusPill(state.library ? `📚 当前范文库：${state.library}` : "📚 未选择范文库", !!state.library, () => openPrepWizard({ need: "rag" })));
 
-      if (mode === "cite") {
-        statusRow.appendChild(statusPill(citeOk ? "✅ 引用写法已准备" : "＋ 准备引用写法（可选）", citeOk, () => openPrepWizard({ need: "cite" })));
-        statusRow.appendChild(statusPill("🧠 本模式不需要模型", true, () => setRoute("llm")));
-        return;
-      }
-
-      statusRow.appendChild(statusPill(ragOk ? "✅ 范文库已准备" : "⚠️ 范文库未准备", ragOk, () => openPrepWizard({ need: "rag" })));
-
-      if (mode !== "polish") {
-        statusRow.appendChild(statusPill("🧠 本模式不需要模型", true, () => setRoute("llm")));
-        return;
-      }
+      statusRow.appendChild(statusPill(ragOk ? "✅ 范文证据已准备" : "⚠️ 范文证据未准备", ragOk, () => openPrepWizard({ need: "rag" })));
 
       const provider = localStorage.getItem("aiw.llmProvider") || "local";
       let llmOk = false;
@@ -1452,39 +1550,17 @@
       if (provider === "api") {
         const api = state.llmApi || {};
         llmOk = !!(api.api_key_present && String(api.base_url || "").trim() && String(api.model || "").trim());
-        llmLabel = llmOk ? "🧠 API 已配置（用于改写）" : "⚠️ API 未配置（可用本地模型）";
+        llmLabel = llmOk ? "🧠 改写模型：API 已配置" : "⚠️ 改写模型：API 未配置";
       } else {
         const ls = state.llm || {};
         const hasAssets = !!(ls.server_ok && ls.model_ok);
         llmOk = hasAssets;
-        llmLabel = ls.running ? "🧠 本地模型运行中（用于改写）" : hasAssets ? "🧠 本地模型已安装（用于改写）" : "⚠️ 本地模型缺失";
+        llmLabel = ls.running ? "🧠 改写模型：本地运行中" : hasAssets ? "🧠 改写模型：本地已安装" : "⚠️ 改写模型：本地缺失";
       }
       statusRow.appendChild(statusPill(llmLabel, llmOk, () => setRoute("llm")));
-    }
 
-    function renderModeUI() {
-      $$(".pill[data-mode]").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
-      if (mode === "scan") {
-        hint.textContent = "把正文拆成句子，找出最不像范文的句子，并给出“对应范文证据”（可一键继续模仿改写）。";
-        primaryBtn.textContent = "开始找差距";
-      } else if (mode === "polish") {
-        hint.textContent = "先对照范文证据，再给出“哪里不像 + 怎么改更像 + 两种改法（保守/更像）”。每条建议都可追溯到范文。";
-        primaryBtn.textContent = "生成模仿改写";
-      } else if (mode === "cite") {
-        hint.textContent = "检索范文里常见的引用句式（正文引用 + 参考文献），可直接借鉴到你的写作里。";
-        primaryBtn.textContent = "检索引用写法";
-      }
+      statusRow.appendChild(statusPill(citeOk ? "✅ 引用写法已准备" : "＋ 引用写法（可选）", citeOk, () => openPrepWizard({ need: "cite" })));
     }
-
-    const inputCard = el(
-      "div",
-      { class: "card home-card" },
-      modeRow,
-      text,
-      el("div", { class: "home-actions" }, primaryBtn),
-      el("div", { class: "home-subactions" }, secondaryBtn, sampleBtn, clearBtn),
-      el("div", { class: "muted" }, hint)
-    );
 
     const onboarding = el("div", { class: "home-onboard" });
     function renderOnboarding() {
@@ -1526,15 +1602,151 @@
       }
     }
 
+    const libGrid = el("div", { class: "topic-grid" });
+    const libSection = el(
+      "div",
+      { class: "grid", style: "gap:12px" },
+      el(
+        "div",
+        { class: "row", style: "justify-content:space-between; align-items:flex-end" },
+        el(
+          "div",
+          null,
+          el("div", { class: "label" }, "我的范文库（专题库）"),
+          el("div", { class: "muted" }, "选择一个同领域范文库开始写作（越同领域，句式越像）。")
+        ),
+        el("div", { class: "row" }, el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "管理…"))
+      ),
+      libGrid
+    );
+
+    function fmtCountHome(n) {
+      const x = Number(n || 0);
+      if (!Number.isFinite(x)) return "0";
+      return String(Math.max(0, Math.round(x)));
+    }
+
+    function renderLibSection() {
+      clear(libGrid);
+
+      const libs = Array.isArray(state.libraries) ? state.libraries.slice() : [];
+      const shown = libs.slice(0, 6);
+
+      for (const lib of shown) {
+        const name = String((lib && lib.name) || "").trim();
+        if (!name) continue;
+        const ragOk = !!lib.rag_index;
+        const citeOk = !!lib.cite_index;
+        const active = name === state.library;
+        const pdfCount = ragOk ? Number(lib.rag_pdf_count || 0) : Number(lib.pdf_import_count || 0);
+
+        const badgeRow = el("div", { class: "topic-badges" });
+        badgeRow.appendChild(el("span", { class: "badge " + (ragOk ? "good" : "bad") }, ragOk ? "已准备" : "未准备"));
+        badgeRow.appendChild(el("span", { class: "badge " + (citeOk ? "good" : "warn") }, citeOk ? "引用就绪" : "引用可选"));
+        if (active) badgeRow.appendChild(el("span", { class: "badge good" }, "正在使用"));
+
+        const selectBtn = el(
+          "button",
+          {
+            class: "btn btn-primary",
+            type: "button",
+            onclick: async (e) => {
+              try {
+                if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+              } catch {}
+              state.library = name;
+              localStorage.setItem("aiw.library", state.library);
+              updateGlobalLibraryUI();
+              toast(`已切换范文库：${name}`);
+              render().catch(() => {});
+            },
+          },
+          active ? "继续写作" : "使用此库"
+        );
+
+        const prepBtn2 = el(
+          "button",
+          {
+            class: "btn",
+            type: "button",
+            onclick: async (e) => {
+              try {
+                if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+              } catch {}
+              state.library = name;
+              localStorage.setItem("aiw.library", state.library);
+              updateGlobalLibraryUI();
+              openPrepWizard({ need: "rag", library: name, lockLibrary: true });
+            },
+          },
+          ragOk ? "更新/重建" : "一键准备"
+        );
+
+        libGrid.appendChild(
+          el(
+            "div",
+            {
+              class: "card topic-card" + (active ? " active" : ""),
+              onclick: () => {
+                state.library = name;
+                localStorage.setItem("aiw.library", state.library);
+                updateGlobalLibraryUI();
+                render().catch(() => {});
+              },
+            },
+            el(
+              "div",
+              { class: "topic-head" },
+              el("div", { class: "topic-icon", "aria-hidden": "true" }, "📚"),
+              el(
+                "div",
+                { class: "topic-meta" },
+                el("div", { class: "topic-name" }, name),
+                el(
+                  "div",
+                  { class: "topic-sub" },
+                  `范文 ${fmtCountHome(pdfCount)} 篇 · ${ragOk ? "已准备" : "未准备"} · ${citeOk ? "引用就绪" : "引用可选"}`
+                )
+              )
+            ),
+            badgeRow,
+            el("div", { class: "topic-actions" }, selectBtn, prepBtn2)
+          )
+        );
+      }
+
+      libGrid.appendChild(
+        el(
+          "div",
+          { class: "card topic-card topic-create" },
+          el("div", { class: "topic-icon", "aria-hidden": "true" }, "＋"),
+          el("div", { class: "topic-name" }, shown.length ? "更多范文库…" : "新建范文库"),
+          el("div", { class: "topic-sub" }, shown.length ? "管理、搜索、准备/更新、引用写法等。" : "导入同领域顶级 PDF，准备一次即可长期复用。"),
+          el(
+            "div",
+            { class: "row" },
+            el(
+              "button",
+              { class: shown.length ? "btn" : "btn btn-primary", type: "button", onclick: () => (shown.length ? setRoute("library") : openPrepWizard({ need: "rag" })) },
+              shown.length ? "打开范文库页" : "开始准备"
+            )
+          )
+        )
+      );
+    }
+
     inner.appendChild(hero);
     inner.appendChild(inputCard);
+    inner.appendChild(toolPanel);
     inner.appendChild(statusRow);
     inner.appendChild(onboarding);
+    inner.appendChild(libSection);
     root.appendChild(inner);
 
-    renderModeUI();
+    markToolActive();
     renderStatus();
     renderOnboarding();
+    renderLibSection();
 
     return root;
   }
@@ -1621,11 +1833,9 @@
       const ragOk = !!(lib && lib.rag_index);
       const citeOk = !!(lib && lib.cite_index);
       const pdfCount = ragOk ? Number(lib.rag_pdf_count || 0) : Number(lib.pdf_import_count || 0);
-      const builtAt = (lib && lib.rag_built_at_iso) || "";
       const bits = [`范文 ${fmtCount(pdfCount)} 篇`];
       bits.push(ragOk ? "已准备" : "未准备");
       bits.push(citeOk ? "含引用写法" : "引用可选");
-      if (builtAt) bits.push(`构建：${builtAt}`);
       return bits.join(" · ");
     }
 
@@ -1654,12 +1864,11 @@
         {
           class: "btn btn-primary",
           type: "button",
-          disabled: active,
           onclick: async () => {
             await useLibrary(name, "home");
           },
         },
-        active ? "正在使用" : "进入写作"
+        active ? "继续写作" : "进入写作"
       );
 
       const prepBtn = el(
@@ -1675,35 +1884,65 @@
         ragOk ? "更新/重建" : "一键准备"
       );
 
-      const citeBtn = el(
+      const moreBtn = el(
         "button",
         {
           class: "btn btn-ghost",
           type: "button",
-          onclick: async () => {
-            await useLibrary(name);
-            if (citeOk) return setRoute("cite");
-            openPrepWizard({ need: "cite", library: name, lockLibrary: true });
-          },
-        },
-        citeOk ? "打开引用写法" : "准备引用写法"
-      );
-
-      const copyBtn = el(
-        "button",
-        {
-          class: "chip",
-          type: "button",
-          title: "复制来源路径",
           onclick: () => {
-            const ragOk2 = !!(lib && lib.rag_index);
-            const src = ragOk2 ? String(lib.rag_pdf_root || "") : String(lib.pdf_import_root || "");
-            if (!src) return toast("暂无来源路径。", "bad", 3500);
-            copyText(src);
-            toast("已复制来源路径。");
+            const src = ragOk ? String(lib.rag_pdf_root || "") : String(lib.pdf_import_root || "");
+            const builtAt = String((lib && lib.rag_built_at_iso) || "").trim();
+            const pdfCount = ragOk ? Number(lib.rag_pdf_count || 0) : Number(lib.pdf_import_count || 0);
+
+            const citeAction = el(
+              "button",
+              {
+                class: "btn btn-primary",
+                type: "button",
+                onclick: async () => {
+                  closeModal();
+                  await useLibrary(name);
+                  if (citeOk) return setRoute("cite");
+                  openPrepWizard({ need: "cite", library: name, lockLibrary: true });
+                },
+              },
+              citeOk ? "打开引用写法" : "准备引用写法（可选）"
+            );
+
+            const copyAction = el(
+              "button",
+              {
+                class: "btn",
+                type: "button",
+                disabled: !src,
+                onclick: () => {
+                  if (!src) return toast("暂无来源路径。", "bad", 3500);
+                  copyText(src);
+                  toast("已复制来源路径。");
+                },
+              },
+              "复制来源路径"
+            );
+
+            const body = el(
+              "div",
+              { class: "grid", style: "gap:14px" },
+              el("div", { class: "muted" }, "这里是范文库的“更多操作”。不会改变你的正文，只影响范文证据的准备与引用写法。"),
+              el(
+                "div",
+                { class: "card" },
+                el("div", { class: "label" }, "状态"),
+                el("div", null, librarySubtitle(lib)),
+                builtAt ? el("div", { class: "muted" }, `构建时间：${builtAt}`) : null,
+                el("div", { class: "muted" }, `范文数量：${fmtCount(pdfCount)} 篇`)
+              ),
+              el("div", { class: "card" }, el("div", { class: "label" }, "来源"), el("div", { class: "quote" }, src || "—")),
+              el("div", { class: "row" }, citeAction, copyAction, el("button", { class: "btn", type: "button", onclick: closeModal }, "关闭"))
+            );
+            openModal(`${name} · 更多`, body);
           },
         },
-        "复制路径"
+        "更多"
       );
 
       return el(
@@ -1716,8 +1955,7 @@
           el("div", { class: "topic-meta" }, el("div", { class: "topic-name" }, name), el("div", { class: "topic-sub" }, librarySubtitle(lib)))
         ),
         badgeRow,
-        el("div", { class: "topic-path muted mono", title: librarySourceLine(lib) }, librarySourceLine(lib)),
-        el("div", { class: "topic-actions" }, primaryBtn, prepBtn, citeBtn, copyBtn)
+        el("div", { class: "topic-actions" }, primaryBtn, prepBtn, moreBtn)
       );
     }
 
@@ -1725,7 +1963,7 @@
     search.value = localStorage.getItem("aiw.libraryQuery") || "";
 
     const createBtn = el("button", { class: "btn btn-primary", type: "button", onclick: () => openCreateLibraryModal() }, "新建范文库");
-    const prepBtn = el("button", { class: "btn", type: "button", onclick: () => openPrepWizard({ need: "rag" }) }, "一键准备（向导）");
+    const prepBtn = el("button", { class: "btn", type: "button", onclick: () => openPrepWizard({ need: "rag" }) }, "导入/更新范文…");
 
     const details = el(
       "details",
@@ -1753,18 +1991,8 @@
 
     const grid = el("div", { class: "topic-grid" });
 
-    const createCard = el(
-      "div",
-      { class: "card topic-card topic-create" },
-      el("div", { class: "topic-icon big", "aria-hidden": "true" }, "＋"),
-      el("div", { class: "topic-name" }, "新建范文库"),
-      el("div", { class: "topic-sub" }, "按领域建立你的“专题库”，准备一次即可长期复用。"),
-      el("button", { class: "btn btn-primary", type: "button", onclick: openCreateLibraryModal }, "新建")
-    );
-
     function renderGrid() {
       clear(grid);
-      grid.appendChild(createCard);
 
       const q = String(search.value || "").trim().toLowerCase();
       const shown = q ? libs.filter((x) => String((x && x.name) || "").toLowerCase().includes(q)) : libs;
@@ -1775,7 +2003,15 @@
       }
 
       if (!shown.length) {
-        grid.appendChild(el("div", { class: "card" }, el("div", { class: "muted" }, "没有匹配的范文库。你可以新建一个，或清空搜索关键字。")));
+        grid.appendChild(
+          el(
+            "div",
+            { class: "card" },
+            el("div", { class: "label" }, "没有匹配的范文库"),
+            el("div", { class: "muted" }, "你可以新建一个范文库（专题库），或清空搜索关键字。"),
+            el("div", { class: "row" }, el("button", { class: "btn btn-primary", type: "button", onclick: openCreateLibraryModal }, "新建范文库"))
+          )
+        );
       }
     }
 
@@ -1961,15 +2197,20 @@
       { class: "card" },
       el("div", { class: "label" }, "输入文本"),
       text,
+      el("div", { class: "row", style: "justify-content:flex-start" }, runBtn, el("span", { class: "muted" }, "只做对照：不生成内容。")),
       el(
-        "div",
-        { class: "row" },
-        el("span", { class: "label" }, "每句范文数"),
-        topk,
-        el("span", { class: "label" }, "最多扫描句子"),
-        maxItems,
-        runBtn,
-        el("span", { class: "muted" }, "找差距只做对照：不生成内容。")
+        "details",
+        { class: "details" },
+        el("summary", { class: "label" }, "高级设置"),
+        el(
+          "div",
+          { class: "row", style: "margin-top:10px" },
+          el("span", { class: "label" }, "每句范文数"),
+          topk,
+          el("span", { class: "label" }, "最多扫描句子"),
+          maxItems,
+          el("span", { class: "muted" }, "提示：数字越大越慢。")
+        )
       )
     );
     root.appendChild(
@@ -3497,7 +3738,7 @@
   function init() {
     const theme = localStorage.getItem("aiw.theme") || "light";
     setTheme(theme);
-    const accent = localStorage.getItem("aiw.accent") || "teal";
+    const accent = localStorage.getItem("aiw.accent") || "ocean";
     setAccent(accent);
     bindClientLifecycle();
     bindEvents();

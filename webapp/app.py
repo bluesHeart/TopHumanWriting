@@ -17,13 +17,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-try:
-    import tkinter as _tk
-    from tkinter import filedialog as _filedialog
-except Exception:  # pragma: no cover
-    _tk = None
-    _filedialog = None
-
 from aiwd.llama_server import LlamaServerConfig, LlamaServerProcess
 from aiwd.openai_compat import OpenAICompatClient, OpenAICompatConfig, extract_first_content, mask_secret, normalize_base_url
 from aiwd.citation_bank import CitationBankError, CitationBankIndexer
@@ -869,73 +862,6 @@ def create_app() -> FastAPI:
 
         threading.Thread(target=loop, daemon=True).start()
 
-    def _pick_folder_dialog() -> str:
-        # Prefer Tk (best UX) when available.
-        if _tk is not None and _filedialog is not None:
-            try:
-                root = _tk.Tk()
-                root.withdraw()
-                root.attributes("-topmost", True)
-            except Exception:
-                root = None
-            try:
-                return (_filedialog.askdirectory(title="Select PDF folder") or "").strip()
-            finally:
-                try:
-                    if root is not None:
-                        root.destroy()
-                except Exception:
-                    pass
-
-        # Portable Python (python.org embeddable) on Windows doesn't ship tkinter.
-        # Fallback to a native folder dialog via Windows PowerShell.
-        if os.name == "nt":
-            try:
-                ps = r"""
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-Add-Type -AssemblyName System.Windows.Forms
-$form = New-Object System.Windows.Forms.Form
-$form.TopMost = $true
-$form.ShowInTaskbar = $false
-$form.WindowState = [System.Windows.Forms.FormWindowState]::Minimized
-$form.Show()
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = "Select PDF folder"
-$dialog.ShowNewFolderButton = $false
-$result = $dialog.ShowDialog($form)
-$form.Close()
-if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath }
-"""
-                creationflags = 0
-                try:
-                    creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
-                except Exception:
-                    creationflags = 0
-                startupinfo = None
-                try:
-                    startupinfo = subprocess.STARTUPINFO()
-                    startupinfo.dwFlags |= int(getattr(subprocess, "STARTF_USESHOWWINDOW", 1) or 1)
-                    startupinfo.wShowWindow = 0
-                except Exception:
-                    startupinfo = None
-                cp = subprocess.run(
-                    ["powershell.exe", "-NoProfile", "-STA", "-Command", ps],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="ignore",
-                    timeout=120,
-                    creationflags=creationflags,
-                    startupinfo=startupinfo,
-                )
-                path = (cp.stdout or "").strip()
-                if path:
-                    return path
-            except Exception:
-                return ""
-
-        return ""
-
     @app.get("/")
     def index():
         return FileResponse(os.path.join(STATIC_DIR, "index.html"))
@@ -1058,11 +984,6 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
             raise HTTPException(status_code=409, detail="library exists")
         path = library_manager.create_library(name)
         return {"name": name, "path": path}
-
-    @app.post("/api/dialog/pick_folder")
-    def pick_folder():
-        path = _pick_folder_dialog()
-        return {"folder": path}
 
     @app.post("/api/client/register")
     def client_register(request: Request, payload: dict = Body(default={})):

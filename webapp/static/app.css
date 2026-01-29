@@ -52,6 +52,10 @@ body[data-route="home"] #indexChips {
   display: none;
 }
 
+body[data-route="home"] .topbar-right {
+  display: none;
+}
+
 .app {
   display: flex;
   min-height: 100vh;
@@ -261,6 +265,24 @@ body[data-route="home"] #indexChips {
   transition: background 140ms ease-out, border-color 140ms ease-out, transform 140ms ease-out;
 }
 
+.pill.mode {
+  background: var(--bg-secondary);
+  border-color: rgba(0, 0, 0, 0.08);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.05);
+  padding: 10px 16px;
+}
+
+.pill.mode:hover {
+  background: rgba(20, 184, 166, 0.08);
+  border-color: rgba(20, 184, 166, 0.35);
+}
+
+.pill.mode.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  border-color: rgba(20, 184, 166, 0.35);
+  color: #fff;
+}
+
 .pill:hover {
   background: rgba(20, 184, 166, 0.08);
   border-color: rgba(20, 184, 166, 0.35);
@@ -338,6 +360,14 @@ body[data-route="home"] #indexChips {
 .home-onboard {
   display: grid;
   gap: 14px;
+}
+
+.home-tools {
+  margin-top: 2px;
+}
+
+.tool-card {
+  cursor: pointer;
 }
 
 .topic-grid {
