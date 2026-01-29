@@ -27,6 +27,7 @@
     polishDraft: localStorage.getItem("aiw.polishDraft") || "",
     clientId: sessionStorage.getItem("aiw.clientId") || "",
     clientHeartbeatTimer: null,
+    modalOnClose: null,
   };
 
   let renderSeq = 0;
@@ -66,8 +67,9 @@
     toast._t = window.setTimeout(() => el.classList.remove("show"), ms);
   }
 
-  async function api(method, url, body) {
+  async function api(method, url, body, opts) {
     const init = { method, headers: {} };
+    if (opts && opts.signal) init.signal = opts.signal;
     if (body !== undefined) {
       init.headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
@@ -87,17 +89,17 @@
     return data;
   }
 
-  const apiGet = (url) => api("GET", url);
-  const apiPost = (url, body) => api("POST", url, body);
+  const apiGet = (url, opts) => api("GET", url, undefined, opts);
+  const apiPost = (url, body, opts) => api("POST", url, body, opts);
 
   function maybeOpenIndexModalForError(msg) {
     const m = String(msg || "").toLowerCase();
     if (m.includes("rag index missing") || m.includes("build library first")) {
-      openIndexModal("rag", state.libraryStatus || {});
+      openPrepWizard({ need: "rag" });
       return true;
     }
     if (m.includes("citation bank missing") || m.includes("cite index missing") || m.includes("build it first")) {
-      openIndexModal("cite", state.libraryStatus || {});
+      openPrepWizard({ need: "cite" });
       return true;
     }
     return false;
@@ -204,10 +206,13 @@
       else if (typeof it === "object") {
         const name = String(it.name || "").trim();
         if (!name) continue;
+        // Safety: ignore internal artifacts even if server forgets to filter.
+        if (name.endsWith(".sentences")) continue;
         out.push({ ...it, name });
       } else {
         const name = String(it).trim();
         if (!name) continue;
+        if (name.endsWith(".sentences")) continue;
         out.push({ name });
       }
     }
@@ -218,6 +223,12 @@
     return (state.libraries || []).map((x) => x && x.name).filter(Boolean);
   }
 
+  function libraryByName(name) {
+    const n = String(name || "").trim();
+    if (!n) return null;
+    return (state.libraries || []).find((x) => x && x.name === n) || null;
+  }
+
   function clear(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
   }
@@ -226,7 +237,7 @@
     const sel = $("#librarySelect");
     clear(sel);
     const libs = state.libraries || [];
-    sel.appendChild(el("option", { value: "" }, "— 选择文献库 —"));
+    sel.appendChild(el("option", { value: "" }, "— 选择范文库 —"));
     for (const lib of libs) {
       const name = (lib && lib.name) || "";
       if (!name) continue;
@@ -237,10 +248,35 @@
   }
 
   async function refreshLibraries() {
-    const data = await apiGet("/api/libraries");
+    let data = null;
+    try {
+      data = await apiGet("/api/libraries/summary");
+    } catch {
+      data = await apiGet("/api/libraries");
+    }
     state.libraries = normalizeLibraries((data && data.libraries) || []);
+
+    // Prefer "ready" libraries near the top (metaso-style topic modules).
+    try {
+      state.libraries.sort((a, b) => {
+        const ar = a && a.rag_index ? 1 : 0;
+        const br = b && b.rag_index ? 1 : 0;
+        if (ar !== br) return br - ar;
+        const an = String((a && a.name) || "");
+        const bn = String((b && b.name) || "");
+        return an.localeCompare(bn);
+      });
+    } catch {}
+
     const names = libraryNames();
     if (state.library && !names.includes(state.library)) state.library = "";
+
+    // If user hasn't picked one yet, auto-select a ready demo library.
+    const hasExplicit = !!localStorage.getItem("aiw.library");
+    if (!hasExplicit) {
+      const ready = (state.libraries || []).find((x) => x && x.rag_index);
+      if (ready && ready.name) state.library = ready.name;
+    }
     if (!state.library && names.length) state.library = names[0];
     updateGlobalLibraryUI();
   }
@@ -250,37 +286,37 @@
     const k = String(kind || "").toLowerCase();
     const ok = k === "semantic" ? !!st.semantic_index : k === "rag" ? !!st.rag_index : k === "cite" ? !!st.cite_index : false;
 
-    let title = "索引状态";
+    let title = "准备状态";
     let desc = "";
     let need = "";
     let nextRoute = "";
     let nextBtn = "";
 
     if (k === "semantic") {
-      title = "语义索引（句向量）";
-      desc = "用于把句子变成“可检索的向量”，让相似度更准。主要由“建库”阶段生成。";
-      need = "不是所有功能都依赖它，但建议建库时一并生成。";
+      title = "写作特征库（提升相似度）";
+      desc = "用于提升“相似段落检索”的准确度。通常在准备范文库时自动生成。";
+      need = "不是所有功能都强依赖，但建议保持开启。";
       nextRoute = "library";
-      nextBtn = "去文献库";
+      nextBtn = "去范文库";
     } else if (k === "rag") {
-      title = "范文索引（用于检索对照）";
-      desc = "用于“对齐扫描/对齐润色”的范文段落检索（离线）。";
-      need = "扫描/润色都需要它。";
+      title = "范文证据库（用于对照）";
+      desc = "用于“找差距/模仿改写”的范文段落检索（离线），给你可追溯的范文证据。";
+      need = "找差距/模仿改写都需要它。";
       nextRoute = "library";
-      nextBtn = "去建库";
+      nextBtn = "去准备";
     } else if (k === "cite") {
-      title = "引用句式库（引用借鉴）";
-      desc = "从范文中抽取“引用句子 + 参考文献”，并做可检索的句式库。";
-      need = "引用借鉴需要它；与范文索引独立，可单独构建。";
+      title = "引用证据库（引用写法）";
+      desc = "从范文中抽取“引用句子 + 参考文献”，用于检索可借鉴的引用写法。";
+      need = "引用写法需要它；通常在准备范文库后再构建。";
       nextRoute = "cite";
-      nextBtn = "去引用借鉴";
+      nextBtn = "去引用写法";
     }
 
     const badge = el("span", { class: "badge " + (ok ? "good" : "bad") }, ok ? "已就绪" : "未就绪");
     const body = el(
       "div",
       { class: "grid", style: "gap:10px" },
-      el("div", { class: "row" }, badge, el("span", { class: "muted" }, state.library ? `当前库：${state.library}` : "未选择文献库")),
+      el("div", { class: "row" }, badge, el("span", { class: "muted" }, state.library ? `当前范文库：${state.library}` : "未选择范文库")),
       el("div", null, desc),
       el("div", { class: "muted" }, need),
       el(
@@ -304,6 +340,566 @@
     openModal(title, body);
   }
 
+  function openPrepWizard(opts = {}) {
+    const need = String(opts.need || "rag").trim().toLowerCase() || "rag"; // "rag" | "cite"
+    const resume = opts.resume && typeof opts.resume === "object" ? opts.resume : null;
+    const presetLibrary = String(opts.library || "").trim();
+    const lockLibrary = !!opts.lockLibrary;
+
+    const title = "准备范文库（第一次使用）";
+
+    let selectedFiles = [];
+    let importing = false;
+    let importCanceled = false;
+    let currentTaskId = "";
+    let pollTimer = null;
+
+    const pdfInput = el("input", { type: "file", multiple: true, accept: ".pdf,application/pdf", style: "display:none" });
+    pdfInput.setAttribute("webkitdirectory", "");
+    pdfInput.setAttribute("directory", "");
+    const pdfInputFiles = el("input", { type: "file", multiple: true, accept: ".pdf,application/pdf", style: "display:none" });
+
+    function fmtCount(n) {
+      const x = Number(n || 0);
+      if (!Number.isFinite(x)) return "0";
+      return String(Math.max(0, Math.round(x)));
+    }
+
+    function prettyStage(stage) {
+      const s = String(stage || "")
+        .trim()
+        .toLowerCase();
+      const map = {
+        starting: "准备中",
+        pdf_extract: "读取 PDF",
+        semantic_embed: "提取写作特征",
+        rag_extract: "切分范文片段",
+        rag_embed: "构建范文对照证据",
+        rag_done: "范文对照证据完成",
+        cite_extract: "抽取引用信息",
+        cite_embed: "构建引用证据",
+        cite_index: "整理引用证据",
+        cite_done: "引用证据完成",
+      };
+      return map[s] || humanTaskStage(stage);
+    }
+
+    function stopPolling() {
+      if (pollTimer) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    async function pollTaskOnce(updateUI) {
+      if (!currentTaskId) return null;
+      try {
+        const t = await apiGet(`/api/tasks/${encodeURIComponent(currentTaskId)}`);
+        if (typeof updateUI === "function") updateUI(t);
+        return t;
+      } catch (e) {
+        stopPolling();
+        throw e;
+      }
+    }
+
+    // Step 0: select/create library
+    const libSel = el("select", { class: "select", style: "flex:1; min-width:220px" });
+    const libName = el("input", { class: "input", placeholder: "给范文库起个名字（例如：finance_2026）", style: "flex:1; min-width:220px; display:none" });
+    const libCreateBtn = el("button", { class: "btn btn-primary", type: "button", style: "display:none" }, "创建");
+    const libNewBtn = el("button", { class: "btn", type: "button" }, "新建范文库");
+    const libHint = el("div", { class: "muted" }, "范文库就是：你收集的同领域顶级 PDF。只要准备一次，之后扫描/润色都会直接有“范文证据”。");
+
+    if (presetLibrary) {
+      state.library = presetLibrary;
+      localStorage.setItem("aiw.library", state.library);
+      updateGlobalLibraryUI();
+    }
+
+    function syncLibSelOptions() {
+      clear(libSel);
+      libSel.appendChild(el("option", { value: "" }, "— 选择范文库 —"));
+      for (const lib of state.libraries || []) {
+        const name = (lib && lib.name) || "";
+        if (!name) continue;
+        libSel.appendChild(el("option", { value: name }, name));
+      }
+      libSel.value = state.library || "";
+    }
+
+    function showNewLibrary(show) {
+      libName.style.display = show ? "" : "none";
+      libCreateBtn.style.display = show ? "" : "none";
+      libNewBtn.style.display = show ? "none" : "";
+      if (show) {
+        libName.value = "";
+        try {
+          libName.focus();
+        } catch {}
+      }
+    }
+
+    libNewBtn.onclick = () => showNewLibrary(true);
+
+    libCreateBtn.onclick = async () => {
+      const name = String(libName.value || "").trim();
+      if (!name) return toast("请输入范文库名字。", "bad");
+      libCreateBtn.disabled = true;
+      libCreateBtn.textContent = "创建中…";
+      try {
+        const r = await apiPost("/api/libraries", { name });
+        let safe = name;
+        try {
+          const p = String((r && r.path) || "");
+          const base = p.split(/[\\/]/).pop() || "";
+          if (base.toLowerCase().endsWith(".json")) safe = base.slice(0, -5) || safe;
+        } catch {}
+        state.library = safe;
+        localStorage.setItem("aiw.library", state.library);
+        await refreshLibraries();
+        await refreshLibraryStatus();
+        updateGlobalLibraryUI();
+        syncLibSelOptions();
+        await syncImportedCount();
+        toast("已创建范文库。");
+        showNewLibrary(false);
+      } catch (e) {
+        toast(String(e.message || e), "bad", 6500);
+      } finally {
+        libCreateBtn.disabled = false;
+        libCreateBtn.textContent = "创建";
+      }
+    };
+
+    libSel.addEventListener("change", async () => {
+      state.library = libSel.value || "";
+      localStorage.setItem("aiw.library", state.library);
+      updateGlobalLibraryUI();
+      await refreshLibraryStatus().catch(() => {});
+      await syncImportedCount().catch(() => {});
+    });
+
+    // Step 1: pick folder (optional when evidence already exists)
+    const selectedInfo = el("div", { class: "muted mono" }, "（可选）新增范文：优先选择“PDF 文件夹”。若无反应，可用“选择多个 PDF”。");
+    const pickBtn = el("button", { class: "btn", type: "button" }, "选择 PDF 文件夹…");
+    const pickFilesBtn = el("button", { class: "btn btn-ghost", type: "button" }, "选择多个 PDF…");
+    pickBtn.onclick = () => pdfInput.click();
+    pickFilesBtn.onclick = () => pdfInputFiles.click();
+
+    function updateSelectedInfo() {
+      const pdfs = selectedFiles.filter((f) => String(f && f.name ? f.name : "").toLowerCase().endsWith(".pdf"));
+      if (!pdfs.length) {
+        selectedInfo.textContent = "（可选）新增范文：优先选择“PDF 文件夹”。若无反应，可用“选择多个 PDF”。";
+        return;
+      }
+      const rel0 = String(pdfs[0].webkitRelativePath || "");
+      const folder = rel0 && rel0.includes("/") ? rel0.split("/")[0] : "";
+      selectedInfo.textContent = folder
+        ? `已选择：${fmtCount(pdfs.length)} 个 PDF · 文件夹：${folder}`
+        : `已选择：${fmtCount(pdfs.length)} 个 PDF`;
+    }
+
+    pdfInput.addEventListener("change", () => {
+      selectedFiles = Array.from(pdfInput.files || []);
+      updateSelectedInfo();
+      if (selectedFiles.length) toast("已选择 PDF 文件夹。");
+    });
+
+    pdfInputFiles.addEventListener("change", () => {
+      selectedFiles = Array.from(pdfInputFiles.files || []);
+      updateSelectedInfo();
+      if (selectedFiles.length) toast("已选择 PDF 文件。");
+    });
+
+    // Step 2: import + build
+    const importedInfo = el("div", { class: "muted mono" }, "—");
+    const importBar = el("div", { class: "progress" }, el("div"));
+    const importText = el("div", { class: "muted mono" }, "—");
+    const buildBar = el("div", { class: "progress" }, el("div"));
+    const buildText = el("div", { class: "muted mono" }, "—");
+
+    const includeCite = el("input", { type: "checkbox" });
+    includeCite.checked = need === "cite";
+
+    async function syncImportedCount() {
+      if (!state.library) {
+        importedInfo.textContent = "请先选择范文库。";
+        return { pdf_count: 0, pdf_root: "" };
+      }
+
+      // Prefer showing evidence-source when the RAG index already exists (avoids "已导入 0" confusion).
+      try {
+        await refreshLibraries();
+      } catch {}
+
+      const lib = (state.libraries || []).find((x) => x && String(x.name || "").trim() === state.library) || null;
+      const ragOk = !!(lib && lib.rag_index);
+      const ragN = lib && lib.rag_pdf_count != null ? Number(lib.rag_pdf_count) : 0;
+      const ragRoot = lib && lib.rag_pdf_root ? String(lib.rag_pdf_root) : "";
+      const importN = lib && lib.pdf_import_count != null ? Number(lib.pdf_import_count) : null;
+      const importRoot = lib && lib.pdf_import_root ? String(lib.pdf_import_root) : "";
+
+      if (ragOk) {
+        const n = Number.isFinite(ragN) ? ragN : 0;
+        importedInfo.textContent = `已准备：${fmtCount(n)} 篇范文（证据库）${ragRoot ? ` · 来源：${ragRoot}` : ""}`;
+        return { pdf_count: n, pdf_root: ragRoot || importRoot || "" };
+      }
+
+      if (importN != null) {
+        const n = Number.isFinite(importN) ? importN : 0;
+        importedInfo.textContent = `已导入：${fmtCount(n)} 个 PDF（离线保存在本地）${importRoot ? ` · 存储：${importRoot}` : ""}`;
+        return { pdf_count: n, pdf_root: importRoot || "" };
+      }
+
+      // Fallback for older server versions.
+      const r = await apiGet(`/api/library/pdf_root?library=${encodeURIComponent(state.library)}`);
+      const n = r && r.pdf_count != null ? Number(r.pdf_count) : 0;
+      importedInfo.textContent = `已导入：${Number.isFinite(n) ? fmtCount(n) : "—"} 个 PDF（离线保存在本地）`;
+      return r || { pdf_count: n || 0, pdf_root: "" };
+    }
+
+    const readyHint = el("div", { class: "muted" }, "—");
+    const goBtn = el("button", { class: "btn btn-primary", type: "button", style: "display:none" }, "直接开始写作");
+    const startBtn = el("button", { class: "btn btn-primary", type: "button" }, "一键准备（导入 + 生成证据）");
+    const cancelBtn = el("button", { class: "btn btn-danger btn-small", type: "button" }, "取消");
+    cancelBtn.style.display = "none";
+
+    function setBars(pct1, txt1, pct2, txt2) {
+      if (pct1 != null) importBar.firstChild.style.width = `${Math.max(0, Math.min(100, Math.round(pct1)))}%`;
+      if (txt1 != null) importText.textContent = String(txt1 || "—");
+      if (pct2 != null) buildBar.firstChild.style.width = `${Math.max(0, Math.min(100, Math.round(pct2)))}%`;
+      if (txt2 != null) buildText.textContent = String(txt2 || "—");
+    }
+
+    async function runImport() {
+      const pdfs = selectedFiles.filter((f) => String(f && f.name ? f.name : "").toLowerCase().endsWith(".pdf"));
+      if (!pdfs.length) return;
+      importing = true;
+      importCanceled = false;
+      setBars(0, `导入中… 0/${fmtCount(pdfs.length)}`, null, null);
+
+      for (let i = 0; i < pdfs.length; i++) {
+        if (importCanceled) break;
+        const f = pdfs[i];
+        const rel = String(f.webkitRelativePath || f.name || "");
+        setBars(((i + 1) / pdfs.length) * 100, `导入中… ${fmtCount(i + 1)}/${fmtCount(pdfs.length)} · ${rel}`, null, null);
+
+        const fd = new FormData();
+        fd.append("library", state.library);
+        fd.append("overwrite", "0");
+        fd.append("file", f, rel || f.name || `file_${i + 1}.pdf`);
+        await apiFormPost("/api/library/upload_pdf", fd);
+      }
+
+      importing = false;
+      if (importCanceled) toast("已取消导入（部分文件可能已导入）。", "bad", 4500);
+      else toast("导入完成。");
+      await syncImportedCount().catch(() => {});
+    }
+
+    async function runBuildLibrary() {
+      const r = await apiPost("/api/library/build", { library: state.library, folder: "" });
+      currentTaskId = (r && r.task_id) || "";
+      if (!currentTaskId) throw new Error("missing task_id");
+
+      const update = (t) => {
+        const done = Number(t.done || 0);
+        const total = Number(t.total || 0);
+        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        const st = humanTaskStatus(t.status);
+        const stage = prettyStage(t.stage);
+        const detail = String(t.detail || "").trim();
+        setBars(null, null, pct, `${st} · ${stage}${total ? ` · ${done}/${total}` : ""}${detail ? ` · ${detail}` : ""}`);
+      };
+
+      // First pull immediately to show something.
+      await pollTaskOnce(update);
+
+      stopPolling();
+      pollTimer = window.setInterval(async () => {
+        try {
+          const t = await pollTaskOnce(update);
+          if (!t) return;
+          if (t.status !== "running") {
+            stopPolling();
+          }
+        } catch (e) {
+          stopPolling();
+          toast(String(e.message || e), "bad", 6500);
+        }
+      }, 800);
+
+      // Wait for completion.
+      while (true) {
+        const t = await pollTaskOnce(update);
+        if (!t) break;
+        if (t.status !== "running") {
+          stopPolling();
+          if (t.status === "done") return t;
+          if (t.status === "canceled") throw new Error("已取消。");
+          throw new Error(String(t.error || "准备失败。").slice(0, 500));
+        }
+        await new Promise((res) => window.setTimeout(res, 800));
+      }
+      return null;
+    }
+
+    async function runBuildCite() {
+      const r = await apiPost("/api/cite/build", { library: state.library, folder: "", max_pages: null });
+      currentTaskId = (r && r.task_id) || "";
+      if (!currentTaskId) throw new Error("missing task_id");
+
+      const update = (t) => {
+        const done = Number(t.done || 0);
+        const total = Number(t.total || 0);
+        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        const st = humanTaskStatus(t.status);
+        const stage = prettyStage(t.stage);
+        const detail = String(t.detail || "").trim();
+        setBars(null, null, pct, `${st} · ${stage}${total ? ` · ${done}/${total}` : ""}${detail ? ` · ${detail}` : ""}`);
+      };
+
+      await pollTaskOnce(update);
+
+      stopPolling();
+      pollTimer = window.setInterval(async () => {
+        try {
+          const t = await pollTaskOnce(update);
+          if (!t) return;
+          if (t.status !== "running") stopPolling();
+        } catch (e) {
+          stopPolling();
+          toast(String(e.message || e), "bad", 6500);
+        }
+      }, 800);
+
+      while (true) {
+        const t = await pollTaskOnce(update);
+        if (!t) break;
+        if (t.status !== "running") {
+          stopPolling();
+          if (t.status === "done") return t;
+          if (t.status === "canceled") throw new Error("已取消。");
+          throw new Error(String(t.error || "构建引用证据失败。").slice(0, 500));
+        }
+        await new Promise((res) => window.setTimeout(res, 800));
+      }
+      return null;
+    }
+
+    function resumeAfterReady() {
+      if (!resume) return;
+      const cur = route();
+      if (resume.autoKey) localStorage.setItem(String(resume.autoKey), String(resume.autoValue || "1"));
+      if (resume.route && resume.route !== cur) setRoute(resume.route);
+      window.setTimeout(() => render().catch(() => {}), 80);
+    }
+
+    cancelBtn.onclick = async () => {
+      if (importing) {
+        importCanceled = true;
+        toast("已请求取消导入（会在当前文件完成后停止）。", "bad", 4500);
+        return;
+      }
+      if (!currentTaskId) return;
+      try {
+        await apiPost(`/api/tasks/${encodeURIComponent(currentTaskId)}/cancel`, {});
+        toast("已请求取消。", "bad", 4500);
+      } catch (e) {
+        toast(String(e.message || e), "bad", 6500);
+      }
+    };
+
+    startBtn.onclick = async () => {
+      if (!state.library) return toast("请先选择/创建范文库。", "bad", 4500);
+
+      startBtn.disabled = true;
+      pickBtn.disabled = true;
+      libSel.disabled = true;
+      libNewBtn.disabled = true;
+      libCreateBtn.disabled = true;
+      cancelBtn.style.display = "";
+      cancelBtn.disabled = false;
+
+      try {
+        setBars(0, "—", 0, "—");
+        await refreshLibraryStatus().catch(() => {});
+        const st0 = state.libraryStatus || {};
+        const ragOk0 = !!st0.rag_index;
+        const citeOk0 = !!st0.cite_index;
+
+        const imported = await syncImportedCount().catch(() => ({ pdf_count: 0 }));
+        const importedN = imported && imported.pdf_count != null ? Number(imported.pdf_count) : 0;
+
+        const hasSelection = selectedFiles.some((f) => String(f && f.name ? f.name : "").toLowerCase().endsWith(".pdf"));
+        if (!hasSelection && (!Number.isFinite(importedN) || importedN <= 0) && !ragOk0) {
+          toast("请先选择包含 PDF 的文件夹。", "bad", 4500);
+          return;
+        }
+
+        let didImport = false;
+        if (hasSelection) {
+          await runImport();
+          didImport = true;
+        } else {
+          if (ragOk0) setBars(100, `跳过导入：已存在范文证据（${fmtCount(importedN)} 篇）`, null, null);
+          else setBars(100, `跳过导入：已检测到本地已导入 ${fmtCount(importedN)} 个 PDF`, null, null);
+        }
+
+        if (!ragOk0 || didImport) {
+          setBars(null, null, 0, "正在生成范文对照证据…（首次可能较慢）");
+          await runBuildLibrary();
+        } else {
+          setBars(null, null, 100, "已就绪：范文对照证据已存在");
+        }
+
+        await refreshLibraryStatus().catch(() => {});
+        const st1 = state.libraryStatus || {};
+        if (!st1.rag_index) throw new Error("范文对照证据未就绪（请重试）。");
+
+        if (includeCite.checked) {
+          if (!citeOk0) {
+            setBars(null, null, 0, "正在准备引用证据…（可选项）");
+            await runBuildCite();
+            await refreshLibraryStatus().catch(() => {});
+          } else {
+            setBars(null, null, 100, "已就绪：引用证据已存在");
+          }
+        }
+
+        toast("范文库准备完成，可以开始对齐写作了。");
+        closeModal();
+        resumeAfterReady();
+      } catch (e) {
+        const msg = String(e.message || e);
+        toast(msg || "准备失败。", "bad", 6500);
+        setBars(null, null, 0, msg || "准备失败。");
+      } finally {
+        startBtn.disabled = false;
+        pickBtn.disabled = false;
+        libSel.disabled = !!lockLibrary;
+        libNewBtn.disabled = false;
+        libCreateBtn.disabled = false;
+        cancelBtn.style.display = "none";
+        stopPolling();
+        currentTaskId = "";
+        importing = false;
+        importCanceled = false;
+      }
+    };
+
+    const needLabel = need === "cite" ? "要用“引用写法”需要先准备引用证据（可选项会更慢）。" : "准备完成后，“找差距/模仿改写”会自动出现范文证据。";
+
+    function syncReadyHint() {
+      const st = state.libraryStatus || {};
+      const ragOk = !!st.rag_index;
+      if (!state.library) {
+        readyHint.textContent = "请先选择/创建范文库。";
+        goBtn.style.display = "none";
+        startBtn.textContent = "一键准备（导入 + 生成证据）";
+        return;
+      }
+      if (ragOk) {
+        readyHint.textContent = "✅ 已检测到范文证据：你可以直接开始写作（找差距/模仿改写）。如要新增范文，再选择文件夹并点击“更新证据”。";
+        goBtn.style.display = "";
+        startBtn.textContent = "更新证据（可选）";
+      } else {
+        readyHint.textContent = "第一次需要：导入同领域 PDF → 生成范文证据。完成后写作过程会显示“参考哪段范文/哪里不像/怎么改更像”。";
+        goBtn.style.display = "none";
+        startBtn.textContent = "一键准备（导入 + 生成证据）";
+      }
+    }
+
+    goBtn.onclick = () => {
+      closeModal();
+      resumeAfterReady();
+    };
+
+    const body = el(
+      "div",
+      { class: "grid", style: "gap:14px" },
+      el("div", { class: "muted" }, "你只需要把同领域的范文 PDF 选进来。软件会在本地生成“可引用的范文证据”，之后写作过程就能白箱对照。"),
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "label" }, "1) 选择范文库"),
+        el("div", { class: "row" }, libSel, libNewBtn, libName, libCreateBtn),
+        libHint
+      ),
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "label" }, "2) 导入范文 PDF（可选：新增范文时）"),
+        el("div", { class: "row" }, pickBtn, pickFilesBtn, selectedInfo),
+        el("div", { class: "muted" }, "建议：50–100 篇 PDF，尽量同领域/同期刊/同风格。越“同风格”，对齐越像。")
+      ),
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "label" }, "3) 一键准备（离线）"),
+        readyHint,
+        el(
+          "div",
+          { class: "row" },
+          goBtn,
+          startBtn,
+          el("label", { class: "row", style: "gap:8px" }, includeCite, el("span", { class: "muted" }, "同时准备引用证据（可选）")),
+          cancelBtn
+        ),
+        el("div", { class: "muted" }, needLabel),
+        importedInfo,
+        el("div", { class: "label", style: "margin-top:10px" }, "导入进度"),
+        importBar,
+        importText,
+        el("div", { class: "label", style: "margin-top:10px" }, "准备进度"),
+        buildBar,
+        buildText
+      ),
+      pdfInput,
+      pdfInputFiles
+    );
+
+    syncLibSelOptions();
+    // If no library selected but we have exactly one existing library, auto-select it.
+    if (!state.library) {
+      const names = libraryNames();
+      if (names.length === 1) {
+        state.library = names[0];
+        localStorage.setItem("aiw.library", state.library);
+        updateGlobalLibraryUI();
+        libSel.value = state.library;
+      } else if (names.length > 1) {
+        libSel.value = names[0];
+      }
+    }
+
+    if (lockLibrary && presetLibrary) {
+      libSel.disabled = true;
+      libNewBtn.style.display = "none";
+      libName.style.display = "none";
+      libCreateBtn.style.display = "none";
+      libHint.textContent = "你正在准备当前范文库：导入范文 PDF → 生成证据 → 在写作里随时引用（白箱可追溯）。";
+    }
+
+    syncImportedCount().catch(() => {});
+    syncReadyHint();
+    refreshLibraryStatus()
+      .catch(() => {})
+      .finally(() => syncReadyHint());
+
+    openModal(title, body, {
+      onClose: () => {
+        stopPolling();
+        try {
+          pdfInput.remove();
+        } catch {}
+        try {
+          pdfInputFiles.remove();
+        } catch {}
+      },
+    });
+  }
+
   function humanTaskStatus(status) {
     const s = String(status || "").trim().toLowerCase();
     if (s === "running") return "进行中";
@@ -318,14 +914,14 @@
     const map = {
       starting: "准备中",
       pdf_extract: "抽取 PDF 文本",
-      semantic_embed: "生成语义索引（句向量）",
-      rag_extract: "切分范文段落",
-      rag_embed: "向量化范文段落",
-      rag_done: "范文索引完成",
-      cite_extract: "抽取引用句子/参考文献",
-      cite_embed: "向量化引用句子",
-      cite_index: "构建引用检索",
-      cite_done: "引用句式库完成",
+      semantic_embed: "提取写作特征",
+      rag_extract: "切分范文片段",
+      rag_embed: "构建范文对照证据",
+      rag_done: "范文对照证据完成",
+      cite_extract: "抽取引用信息",
+      cite_embed: "构建引用证据",
+      cite_index: "整理引用证据",
+      cite_done: "引用证据完成",
     };
     return map[s] || String(stage || "—");
   }
@@ -333,41 +929,33 @@
   function formatIndexChips(status) {
     const box = $("#indexChips");
     clear(box);
-    if (!status) return;
+    if (!status || !state.library) return;
+
+    const ragOk = !!status.rag_index;
     box.appendChild(
       el(
         "button",
         {
-          class: "chip " + (status.semantic_index ? "ok" : "warn"),
+          class: "chip " + (ragOk ? "ok" : "bad"),
           type: "button",
-          title: "语义索引（句向量）状态与说明",
-          onclick: () => openIndexModal("semantic", status),
+          title: ragOk ? "范文库已准备好" : "点击一键准备范文库",
+          onclick: () => openPrepWizard({ need: "rag" }),
         },
-        "语义"
+        ragOk ? "✅ 范文库就绪" : "⚠️ 准备范文库"
       )
     );
+
+    const citeOk = !!status.cite_index;
     box.appendChild(
       el(
         "button",
         {
-          class: "chip " + (status.rag_index ? "ok" : "bad"),
+          class: "chip " + (citeOk ? "ok" : "warn"),
           type: "button",
-          title: "范文索引状态与说明",
-          onclick: () => openIndexModal("rag", status),
+          title: citeOk ? "引用写法已准备好" : "点击一键准备引用写法（可选）",
+          onclick: () => openPrepWizard({ need: "cite" }),
         },
-        "范文"
-      )
-    );
-    box.appendChild(
-      el(
-        "button",
-        {
-          class: "chip " + (status.cite_index ? "ok" : "warn"),
-          type: "button",
-          title: "引用句式库状态与说明",
-          onclick: () => openIndexModal("cite", status),
-        },
-        "引用"
+        citeOk ? "✅ 引用写法就绪" : "＋ 引用写法（可选）"
       )
     );
   }
@@ -390,6 +978,8 @@
   }
 
   function openModal(title, bodyNode) {
+    const opts = arguments.length >= 3 ? arguments[2] : null;
+    state.modalOnClose = opts && typeof opts.onClose === "function" ? opts.onClose : null;
     $("#modalTitle").textContent = title;
     const body = $("#modalBody");
     clear(body);
@@ -398,9 +988,14 @@
   }
 
   function closeModal() {
+    const onClose = state.modalOnClose;
+    state.modalOnClose = null;
     $("#modalBackdrop").classList.add("hidden");
     $("#modalTitle").textContent = "—";
     clear($("#modalBody"));
+    try {
+      if (typeof onClose === "function") onClose();
+    } catch {}
   }
 
   async function refreshLLMStatus() {
@@ -422,7 +1017,7 @@
       const hasUrl = !!String(api.base_url || "").trim();
       const hasModel = !!String(api.model || "").trim();
 
-      let text = "LLM: API ";
+      let text = "模型: API ";
       if (!hasKey) text += "缺少 Key";
       else if (!hasUrl) text += "缺少 URL";
       else if (!hasModel) text += "缺少模型";
@@ -437,7 +1032,7 @@
     const modelOk = !!st.model_ok;
     const serverOk = !!st.server_ok;
     const running = !!st.running;
-    let text = "LLM: ";
+    let text = "模型: ";
     if (!serverOk) text += "缺少 llama-server";
     else if (!modelOk) text += "缺少模型";
     else if (running) text += "运行中";
@@ -710,7 +1305,7 @@
       el(
         "div",
         { class: "home-kicker" },
-        "扫描不调用大模型；润色才调用本地模型 / 可选 API（温度固定 0，尽量不发散）。"
+        "三步上手：① 准备范文库（只做一次）② 粘贴段落 ③ 找差距 / 模仿改写（每条建议都有范文证据背书）。"
       )
     );
 
@@ -734,6 +1329,7 @@
             mode = id;
             localStorage.setItem(modeKey, mode);
             renderModeUI();
+            renderStatus();
           },
         },
         label
@@ -745,14 +1341,14 @@
     const modeRow = el(
       "div",
       { class: "home-modes" },
-      modeChip("scan", "🧭 找出最不像范文的句子", "只做检索对照，不调用大模型"),
-      modeChip("polish", "✨ 生成对齐润色（白箱）", "会调用本地模型/大模型 API 输出诊断+改写+证据"),
-      modeChip("cite", "🔖 借鉴引用句式", "检索范文里“怎么引文/怎么表述贡献”")
+      modeChip("scan", "🧭 找差距（哪里不像）", "只做范文对照，找出最不像范文的句子"),
+      modeChip("polish", "✨ 模仿改写（更像范文）", "白箱输出：诊断 + 可选改法 + 范文证据"),
+      modeChip("cite", "🔖 引用写法（可借鉴）", "检索范文里的引用表达与参考文献")
     );
 
     const hint = el("div", { class: "home-hint" });
     const primaryBtn = el("button", { class: "btn btn-primary home-primary", type: "button" }, "开始");
-    const secondaryBtn = el("button", { class: "btn home-secondary", type: "button" }, "导入范文库…");
+    const secondaryBtn = el("button", { class: "btn home-secondary", type: "button" }, "准备范文库…");
     const sampleBtn = el("button", { class: "btn btn-ghost", type: "button" }, "填入示例");
     const clearBtn = el("button", { class: "btn btn-ghost", type: "button" }, "清空");
 
@@ -770,32 +1366,40 @@
       toast("已清空。");
     };
 
-    secondaryBtn.onclick = () => setRoute("library");
+    secondaryBtn.onclick = () => openPrepWizard({ need: "rag" });
 
     primaryBtn.onclick = () => {
-      if (!state.library) return toast("先在右上角选择/创建一个“文献库”。", "bad", 4500);
       const raw = (text.value || "").trim();
       if (!raw) return toast("请先粘贴文本。", "bad");
 
       if (mode === "scan") {
         state.scanDraft = raw;
         localStorage.setItem("aiw.scanDraft", state.scanDraft);
+        if (!state.library || !(state.libraryStatus && state.libraryStatus.rag_index)) {
+          openPrepWizard({ need: "rag", resume: { route: "scan", autoKey: "aiw.scanAutoRun", autoValue: "1" } });
+          return toast("先准备范文库（第一次需要导入 PDF）。", "bad", 4500);
+        }
         localStorage.setItem("aiw.scanAutoRun", "1");
-        setRoute("scan");
-        return;
+        return setRoute("scan");
       }
       if (mode === "polish") {
         state.polishDraft = raw;
         localStorage.setItem("aiw.polishDraft", state.polishDraft);
+        if (!state.library || !(state.libraryStatus && state.libraryStatus.rag_index)) {
+          openPrepWizard({ need: "rag", resume: { route: "polish", autoKey: "aiw.polishAutoRun", autoValue: "generate" } });
+          return toast("先准备范文库（第一次需要导入 PDF）。", "bad", 4500);
+        }
         localStorage.setItem("aiw.polishAutoRun", "generate");
-        setRoute("polish");
-        return;
+        return setRoute("polish");
       }
       if (mode === "cite") {
         localStorage.setItem("aiw.citeQueryDraft", raw);
+        if (!state.library || !(state.libraryStatus && state.libraryStatus.cite_index)) {
+          openPrepWizard({ need: "cite", resume: { route: "cite", autoKey: "aiw.citeAutoRun", autoValue: "1" } });
+          return toast("先准备范文库（可选：同时准备引用写法）。", "bad", 4500);
+        }
         localStorage.setItem("aiw.citeAutoRun", "1");
-        setRoute("cite");
-        return;
+        return setRoute("cite");
       }
     };
 
@@ -827,9 +1431,20 @@
       const ragOk = !!st.rag_index;
       const citeOk = !!st.cite_index;
 
-      statusRow.appendChild(statusPill(state.library ? `📚 当前库：${state.library}` : "📚 未选择文献库", !!state.library));
-      statusRow.appendChild(statusPill(ragOk ? "✅ 范文索引就绪" : "⚠️ 范文索引未建", ragOk, () => openIndexModal("rag", st)));
-      statusRow.appendChild(statusPill(citeOk ? "✅ 引用句式库就绪" : "⚠️ 引用句式库未建", citeOk, () => openIndexModal("cite", st)));
+      statusRow.appendChild(statusPill(state.library ? `📚 当前范文库：${state.library}` : "📚 未选择范文库", !!state.library, () => openPrepWizard({ need: "rag" })));
+
+      if (mode === "cite") {
+        statusRow.appendChild(statusPill(citeOk ? "✅ 引用写法已准备" : "＋ 准备引用写法（可选）", citeOk, () => openPrepWizard({ need: "cite" })));
+        statusRow.appendChild(statusPill("🧠 本模式不需要模型", true, () => setRoute("llm")));
+        return;
+      }
+
+      statusRow.appendChild(statusPill(ragOk ? "✅ 范文库已准备" : "⚠️ 范文库未准备", ragOk, () => openPrepWizard({ need: "rag" })));
+
+      if (mode !== "polish") {
+        statusRow.appendChild(statusPill("🧠 本模式不需要模型", true, () => setRoute("llm")));
+        return;
+      }
 
       const provider = localStorage.getItem("aiw.llmProvider") || "local";
       let llmOk = false;
@@ -837,12 +1452,12 @@
       if (provider === "api") {
         const api = state.llmApi || {};
         llmOk = !!(api.api_key_present && String(api.base_url || "").trim() && String(api.model || "").trim());
-        llmLabel = llmOk ? "🧠 API 已配置" : "⚠️ API 未配置";
+        llmLabel = llmOk ? "🧠 API 已配置（用于改写）" : "⚠️ API 未配置（可用本地模型）";
       } else {
         const ls = state.llm || {};
         const hasAssets = !!(ls.server_ok && ls.model_ok);
         llmOk = hasAssets;
-        llmLabel = ls.running ? "🧠 本地模型运行中" : hasAssets ? "🧠 本地模型已安装" : "⚠️ 本地模型缺失";
+        llmLabel = ls.running ? "🧠 本地模型运行中（用于改写）" : hasAssets ? "🧠 本地模型已安装（用于改写）" : "⚠️ 本地模型缺失";
       }
       statusRow.appendChild(statusPill(llmLabel, llmOk, () => setRoute("llm")));
     }
@@ -850,14 +1465,14 @@
     function renderModeUI() {
       $$(".pill[data-mode]").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
       if (mode === "scan") {
-        hint.textContent = "会把你的正文按句切分，找出最不像范文的句子，并给出每句对应的范文证据（可点“润色这个句子”继续）。";
-        primaryBtn.textContent = "开始扫描";
+        hint.textContent = "把正文拆成句子，找出最不像范文的句子，并给出“对应范文证据”（可一键继续模仿改写）。";
+        primaryBtn.textContent = "开始找差距";
       } else if (mode === "polish") {
-        hint.textContent = "会先检索范文证据（C1..Ck），再生成“诊断 + 轻改/中改 + 引用证据”，让句式更贴近范文。";
-        primaryBtn.textContent = "生成对齐润色";
+        hint.textContent = "先对照范文证据，再给出“哪里不像 + 怎么改更像 + 两种改法（保守/更像）”。每条建议都可追溯到范文。";
+        primaryBtn.textContent = "生成模仿改写";
       } else if (mode === "cite") {
-        hint.textContent = "会在范文库中检索相似的引用句式（如 Following…, We contribute…, (Smith, 2020)）。";
-        primaryBtn.textContent = "检索引用句式";
+        hint.textContent = "检索范文里常见的引用句式（正文引用 + 参考文献），可直接借鉴到你的写作里。";
+        primaryBtn.textContent = "检索引用写法";
       }
     }
 
@@ -880,9 +1495,14 @@
           el(
             "div",
             { class: "card" },
-            el("div", { class: "label" }, "第一次使用（3 步）"),
-            el("ol", null, el("li", null, "创建文献库（右上角选择框旁，或去“文献库”页）。"), el("li", null, "导入同领域 PDF 范文到本地库。"), el("li", null, "开始建库（生成范文索引）。")),
-            el("div", { class: "row" }, el("button", { class: "btn btn-primary", type: "button", onclick: () => setRoute("library") }, "去文献库"))
+            el("div", { class: "label" }, "第一次使用：先准备范文库（只做一次）"),
+            el("div", { class: "muted" }, "把同领域顶级 PDF 放进来，软件会生成“可引用的范文证据”。之后你每次写作都能白箱对照。"),
+            el(
+              "div",
+              { class: "row" },
+              el("button", { class: "btn btn-primary", type: "button", onclick: () => openPrepWizard({ need: "rag" }) }, "一键准备范文库"),
+              el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "去范文库页")
+            )
           )
         );
         return;
@@ -893,9 +1513,14 @@
           el(
             "div",
             { class: "card" },
-            el("div", { class: "label" }, "还不能扫描/润色：缺少“范文索引”"),
-            el("div", { class: "muted" }, "先到“文献库”完成：导入 PDF → 开始建库。完成后再回来。"),
-            el("div", { class: "row" }, el("button", { class: "btn btn-primary", type: "button", onclick: () => setRoute("library") }, "去建库"))
+            el("div", { class: "label" }, "范文库未准备好：还不能找差距/模仿改写"),
+            el("div", { class: "muted" }, "第一次需要导入 PDF，并在本地生成“范文证据库”。完成后这里会自动变得可用。"),
+            el(
+              "div",
+              { class: "row" },
+              el("button", { class: "btn btn-primary", type: "button", onclick: () => openPrepWizard({ need: "rag" }) }, "一键准备范文库"),
+              el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "去范文库页")
+            )
           )
         );
       }
@@ -915,50 +1540,8 @@
   }
 
   function pageLibrary() {
-    renderHeader("文献库", "导入同领域顶级 PDF 范文 → 建索引 → 用于扫描/润色/引用借鉴（离线保存）。");
+    renderHeader("范文库", "像专题库一样管理：每个范文库=同领域顶级文档集合。准备一次，写作全程白箱对齐。");
     const root = el("div", { class: "grid", style: "gap:18px" });
-
-    const createName = el("input", { class: "input", placeholder: "新建库名（例如：finance_2026）", style: "flex:1; min-width:320px" });
-    const createBtn = el(
-      "button",
-      {
-        class: "btn btn-primary",
-        type: "button",
-        onclick: async () => {
-          const name = (createName.value || "").trim();
-          if (!name) return toast("请输入库名。", "bad");
-          try {
-            const r = await apiPost("/api/libraries", { name });
-            let safe = name;
-            try {
-              const p = String((r && r.path) || "");
-              const base = p.split(/[\\/]/).pop() || "";
-              if (base.toLowerCase().endsWith(".json")) safe = base.slice(0, -5) || safe;
-            } catch {}
-            state.library = safe;
-            localStorage.setItem("aiw.library", state.library);
-            await refreshLibraries();
-            await refreshLibraryStatus();
-            await syncPdfRoot();
-            createName.value = "";
-            toast("已创建文献库。");
-          } catch (e) {
-            toast(String(e.message || e), "bad");
-          }
-        },
-      },
-      "创建文献库"
-    );
-
-    // Browser-native folder picker (no PowerShell / no tkinter).
-    const pdfInput = el("input", { type: "file", multiple: true, accept: ".pdf,application/pdf", style: "display:none" });
-    pdfInput.setAttribute("webkitdirectory", "");
-    pdfInput.setAttribute("directory", "");
-
-    let selectedFiles = [];
-    const selectedInfo = el("div", { class: "muted mono" }, "未选择文件夹。");
-    const importProgressBar = el("div", { class: "progress" }, el("div"));
-    const importProgressText = el("div", { class: "muted mono" }, "—");
 
     function fmtCount(n) {
       const x = Number(n || 0);
@@ -966,274 +1549,248 @@
       return String(Math.max(0, Math.round(x)));
     }
 
-    function updateSelectedInfo() {
-      const pdfs = selectedFiles.filter((f) => String(f && f.name ? f.name : "").toLowerCase().endsWith(".pdf"));
-      if (!pdfs.length) {
-        selectedInfo.textContent = "未选择文件夹。";
-        return;
-      }
-      const rel0 = String(pdfs[0].webkitRelativePath || pdfs[0].name || "");
-      const folder = rel0.includes("/") ? rel0.split("/")[0] : "PDF_Folder";
-      selectedInfo.textContent = `已选择：${fmtCount(pdfs.length)} 个 PDF · 文件夹：${folder}`;
+    async function useLibrary(name, nextRoute = "") {
+      const libName = String(name || "").trim();
+      if (!libName) return;
+      state.library = libName;
+      localStorage.setItem("aiw.library", state.library);
+      updateGlobalLibraryUI();
+      await refreshLibraryStatus().catch(() => {});
+      toast(`已切换范文库：${libName}`);
+      if (nextRoute) setRoute(nextRoute);
     }
 
-    pdfInput.addEventListener("change", () => {
-      selectedFiles = Array.from(pdfInput.files || []);
-      updateSelectedInfo();
-      if (selectedFiles.length) toast("已选择文件夹（待导入）。");
+    function openCreateLibraryModal() {
+      const nameInput = el("input", { class: "input", placeholder: "例如：finance_2026（建议用领域/年份命名）" });
+      const createBtn = el(
+        "button",
+        {
+          class: "btn btn-primary",
+          type: "button",
+          onclick: async () => {
+            const name = String(nameInput.value || "").trim();
+            if (!name) return toast("请输入范文库名字。", "bad", 4500);
+            createBtn.disabled = true;
+            createBtn.textContent = "创建中…";
+            try {
+              const r = await apiPost("/api/libraries", { name });
+              let safe = name;
+              try {
+                const p = String((r && r.path) || "");
+                const base = p.split(/[\\/]/).pop() || "";
+                if (base.toLowerCase().endsWith(".json")) safe = base.slice(0, -5) || safe;
+              } catch {}
+              await useLibrary(safe);
+              await refreshLibraries().catch(() => {});
+              closeModal();
+              openPrepWizard({ need: "rag", library: safe, lockLibrary: true });
+            } catch (e) {
+              toast(String(e.message || e), "bad", 6500);
+            } finally {
+              createBtn.disabled = false;
+              createBtn.textContent = "创建并开始准备";
+            }
+          },
+        },
+        "创建并开始准备"
+      );
+
+      const body = el(
+        "div",
+        { class: "grid", style: "gap:14px" },
+        el("div", { class: "muted" }, "范文库=你的“专题库”。把同领域顶级 PDF 放进来，之后写作就能逐句对照、可追溯。"),
+        el("div", { class: "row" }, nameInput),
+        el("div", { class: "row" }, createBtn, el("button", { class: "btn", type: "button", onclick: closeModal }, "取消")),
+        el("div", { class: "muted" }, "提示：第一次准备会占用 CPU（8GB 笔记本也可用，耐心等几分钟）。")
+      );
+      openModal("新建范文库", body);
+      try {
+        nameInput.focus();
+      } catch {}
+    }
+
+    function isSample(lib) {
+      const name = String((lib && lib.name) || "").toLowerCase();
+      if (!name) return false;
+      if (name.includes("demo") || name.includes("smoke")) return true;
+      const src = String((lib && lib.rag_pdf_root) || "");
+      return src.toLowerCase().includes("sample_pdfs");
+    }
+
+    function librarySubtitle(lib) {
+      const ragOk = !!(lib && lib.rag_index);
+      const citeOk = !!(lib && lib.cite_index);
+      const pdfCount = ragOk ? Number(lib.rag_pdf_count || 0) : Number(lib.pdf_import_count || 0);
+      const builtAt = (lib && lib.rag_built_at_iso) || "";
+      const bits = [`范文 ${fmtCount(pdfCount)} 篇`];
+      bits.push(ragOk ? "已准备" : "未准备");
+      bits.push(citeOk ? "含引用写法" : "引用可选");
+      if (builtAt) bits.push(`构建：${builtAt}`);
+      return bits.join(" · ");
+    }
+
+    function librarySourceLine(lib) {
+      const ragOk = !!(lib && lib.rag_index);
+      const src = ragOk ? String(lib.rag_pdf_root || "") : String(lib.pdf_import_root || "");
+      if (!src) return "来源：—";
+      return `来源：${src}`;
+    }
+
+    function topicCard(lib) {
+      const name = String((lib && lib.name) || "").trim();
+      if (!name) return null;
+      const ragOk = !!lib.rag_index;
+      const citeOk = !!lib.cite_index;
+      const active = name === state.library;
+
+      const badgeRow = el("div", { class: "topic-badges" });
+      if (isSample(lib)) badgeRow.appendChild(el("span", { class: "badge" }, "示例"));
+      badgeRow.appendChild(el("span", { class: "badge " + (ragOk ? "good" : "bad") }, ragOk ? "已准备" : "未准备"));
+      badgeRow.appendChild(el("span", { class: "badge " + (citeOk ? "good" : "warn") }, citeOk ? "引用就绪" : "引用可选"));
+      if (active) badgeRow.appendChild(el("span", { class: "badge good" }, "正在使用"));
+
+      const primaryBtn = el(
+        "button",
+        {
+          class: "btn btn-primary",
+          type: "button",
+          disabled: active,
+          onclick: async () => {
+            await useLibrary(name, "home");
+          },
+        },
+        active ? "正在使用" : "进入写作"
+      );
+
+      const prepBtn = el(
+        "button",
+        {
+          class: "btn",
+          type: "button",
+          onclick: async () => {
+            await useLibrary(name);
+            openPrepWizard({ need: "rag", library: name, lockLibrary: true });
+          },
+        },
+        ragOk ? "更新/重建" : "一键准备"
+      );
+
+      const citeBtn = el(
+        "button",
+        {
+          class: "btn btn-ghost",
+          type: "button",
+          onclick: async () => {
+            await useLibrary(name);
+            if (citeOk) return setRoute("cite");
+            openPrepWizard({ need: "cite", library: name, lockLibrary: true });
+          },
+        },
+        citeOk ? "打开引用写法" : "准备引用写法"
+      );
+
+      const copyBtn = el(
+        "button",
+        {
+          class: "chip",
+          type: "button",
+          title: "复制来源路径",
+          onclick: () => {
+            const ragOk2 = !!(lib && lib.rag_index);
+            const src = ragOk2 ? String(lib.rag_pdf_root || "") : String(lib.pdf_import_root || "");
+            if (!src) return toast("暂无来源路径。", "bad", 3500);
+            copyText(src);
+            toast("已复制来源路径。");
+          },
+        },
+        "复制路径"
+      );
+
+      return el(
+        "div",
+        { class: "card topic-card" + (active ? " active" : "") },
+        el(
+          "div",
+          { class: "topic-head" },
+          el("div", { class: "topic-icon", "aria-hidden": "true" }, "📚"),
+          el("div", { class: "topic-meta" }, el("div", { class: "topic-name" }, name), el("div", { class: "topic-sub" }, librarySubtitle(lib)))
+        ),
+        badgeRow,
+        el("div", { class: "topic-path muted mono", title: librarySourceLine(lib) }, librarySourceLine(lib)),
+        el("div", { class: "topic-actions" }, primaryBtn, prepBtn, citeBtn, copyBtn)
+      );
+    }
+
+    const search = el("input", { class: "input", placeholder: "搜索范文库…", style: "flex:1; min-width:240px" });
+    search.value = localStorage.getItem("aiw.libraryQuery") || "";
+
+    const createBtn = el("button", { class: "btn btn-primary", type: "button", onclick: () => openCreateLibraryModal() }, "新建范文库");
+    const prepBtn = el("button", { class: "btn", type: "button", onclick: () => openPrepWizard({ need: "rag" }) }, "一键准备（向导）");
+
+    const details = el(
+      "details",
+      { class: "details" },
+      el("summary", { class: "label" }, "这是什么？（点开查看）"),
+      el("div", { class: "muted" }, "范文库=你的“专题库”：放入同领域顶级 PDF，准备一次，后续写作就能逐句对照（白箱可追溯）。"),
+      el(
+        "ol",
+        null,
+        el("li", null, "找差距：不生成内容，只做对照，定位哪里不像范文。"),
+        el("li", null, "模仿改写：引用范文证据，给出“哪里不像 + 怎么改更像 + 两种改法”。"),
+        el("li", null, "引用写法：检索范文里常见的引用句式与参考文献（可选）。")
+      )
+    );
+
+    root.appendChild(el("div", { class: "card" }, el("div", { class: "row" }, search, createBtn, prepBtn), details));
+
+    const libs = Array.isArray(state.libraries) ? state.libraries.slice() : [];
+    libs.sort((a, b) => {
+      const aOk = a && a.rag_index ? 1 : 0;
+      const bOk = b && b.rag_index ? 1 : 0;
+      if (aOk !== bOk) return bOk - aOk;
+      return String((a && a.name) || "").localeCompare(String((b && b.name) || ""), "zh-Hans-CN");
     });
 
-    const pickBtn = el(
-      "button",
-      {
-        class: "btn",
-        type: "button",
-        onclick: () => pdfInput.click(),
-      },
-      "选择 PDF 文件夹…"
+    const grid = el("div", { class: "topic-grid" });
+
+    const createCard = el(
+      "div",
+      { class: "card topic-card topic-create" },
+      el("div", { class: "topic-icon big", "aria-hidden": "true" }, "＋"),
+      el("div", { class: "topic-name" }, "新建范文库"),
+      el("div", { class: "topic-sub" }, "按领域建立你的“专题库”，准备一次即可长期复用。"),
+      el("button", { class: "btn btn-primary", type: "button", onclick: openCreateLibraryModal }, "新建")
     );
 
-    const clearImportBtn = el(
-      "button",
-      {
-        class: "btn btn-danger btn-small",
-        type: "button",
-        onclick: async () => {
-          if (!state.library) return toast("请先选择文献库。", "bad");
-          const ok = window.confirm("确定清空此库已导入的 PDF 吗？\n\n这不会删除你的原始文件夹，只会清空 TopHumanWriting_data 里的拷贝。");
-          if (!ok) return;
-          try {
-            await apiPost("/api/library/import/clear", { library: state.library });
-            await syncPdfRoot();
-            toast("已清空导入的 PDF。");
-          } catch (e) {
-            toast(String(e.message || e), "bad", 6500);
-          }
-        },
-      },
-      "清空已导入"
-    );
+    function renderGrid() {
+      clear(grid);
+      grid.appendChild(createCard);
 
-    async function syncPdfRoot() {
-      if (!state.library) {
-        state.pdfFolder = "";
-        localStorage.setItem("aiw.pdfFolder", "");
-        return null;
+      const q = String(search.value || "").trim().toLowerCase();
+      const shown = q ? libs.filter((x) => String((x && x.name) || "").toLowerCase().includes(q)) : libs;
+
+      for (const lib of shown) {
+        const c = topicCard(lib);
+        if (c) grid.appendChild(c);
       }
-      try {
-        const r = await apiGet(`/api/library/pdf_root?library=${encodeURIComponent(state.library)}`);
-        state.pdfFolder = (r && r.pdf_root) || "";
-        localStorage.setItem("aiw.pdfFolder", state.pdfFolder || "");
-        const n = (r && r.pdf_count) != null ? Number(r.pdf_count) : null;
-        if (state.pdfFolder) {
-          importProgressText.textContent = `已导入：${n == null ? "—" : fmtCount(n)} 个 PDF · 存储：${state.pdfFolder}`;
-        }
-        return r || null;
-      } catch {
-        // ignore
-        return null;
+
+      if (!shown.length) {
+        grid.appendChild(el("div", { class: "card" }, el("div", { class: "muted" }, "没有匹配的范文库。你可以新建一个，或清空搜索关键字。")));
       }
     }
 
-    const importBtn = el(
-      "button",
-      {
-        class: "btn btn-primary",
-        type: "button",
-        onclick: async () => {
-          if (!state.library) return toast("请先选择文献库。", "bad");
-          const pdfs = selectedFiles.filter((f) => String(f && f.name ? f.name : "").toLowerCase().endsWith(".pdf"));
-          if (!pdfs.length) return toast("请先选择包含 PDF 的文件夹。", "bad");
+    search.addEventListener("input", () => {
+      localStorage.setItem("aiw.libraryQuery", search.value || "");
+      renderGrid();
+    });
 
-          importBtn.disabled = true;
-          pickBtn.disabled = true;
-          clearImportBtn.disabled = true;
-          let canceled = false;
-          const cancelBtn = el(
-            "button",
-            {
-              class: "btn btn-danger btn-small",
-              type: "button",
-              onclick: () => {
-                canceled = true;
-                toast("已请求取消导入（会在当前文件完成后停止）。", "bad");
-              },
-            },
-            "取消导入"
-          );
-          importBtn.parentElement && importBtn.parentElement.appendChild(cancelBtn);
-
-          try {
-            importProgressBar.firstChild.style.width = "0%";
-            importProgressText.textContent = `导入中… 0/${fmtCount(pdfs.length)}`;
-
-            for (let i = 0; i < pdfs.length; i++) {
-              if (canceled) break;
-              const f = pdfs[i];
-              const rel = String(f.webkitRelativePath || f.name || "");
-              importProgressText.textContent = `导入中… ${fmtCount(i + 1)}/${fmtCount(pdfs.length)} · ${rel}`;
-              importProgressBar.firstChild.style.width = `${Math.round(((i + 1) / pdfs.length) * 100)}%`;
-
-              const fd = new FormData();
-              fd.append("library", state.library);
-              fd.append("overwrite", "0");
-              fd.append("file", f, rel || f.name || `file_${i + 1}.pdf`);
-              await apiFormPost("/api/library/upload_pdf", fd);
-            }
-
-            await syncPdfRoot();
-            if (canceled) toast("导入已取消（部分文件可能已导入）。", "bad", 4500);
-            else toast("导入完成。");
-          } catch (e) {
-            await syncPdfRoot().catch(() => {});
-            toast("导入失败：" + String(e.message || e), "bad", 6500);
-          } finally {
-            importBtn.disabled = false;
-            pickBtn.disabled = false;
-            clearImportBtn.disabled = false;
-            try {
-              cancelBtn.remove();
-            } catch {}
-          }
-        },
-      },
-      "导入到本地库"
-    );
-
-    const buildBtn = el(
-      "button",
-      {
-        class: "btn btn-primary",
-        type: "button",
-        onclick: async () => {
-          if (!state.library) return toast("请先选择文献库。", "bad");
-          const r0 = await syncPdfRoot().catch(() => null);
-          const n0 = r0 && r0.pdf_count != null ? Number(r0.pdf_count) : null;
-          if (n0 !== null && n0 <= 0) return toast("此库还没有导入 PDF。请先“选择 PDF 文件夹 → 导入到本地库”。", "bad");
-          try {
-            const r = await apiPost("/api/library/build", { library: state.library, folder: state.pdfFolder || "" });
-            state.buildTaskId = r.task_id;
-            localStorage.setItem("aiw.buildTaskId", state.buildTaskId || "");
-            startBuildPolling();
-            toast("已开始建库（后台进行）。");
-          } catch (e) {
-            toast(String(e.message || e), "bad");
-          }
-        },
-      },
-      "开始建库"
-    );
-
-    const progressBar = el("div", { class: "progress" }, el("div"));
-    const progressText = el("div", { class: "muted mono" }, "—");
-    const cancelBtn = el(
-      "button",
-      {
-        class: "btn btn-danger btn-small",
-        type: "button",
-        onclick: async () => {
-          if (!state.buildTaskId) return;
-          try {
-            await apiPost(`/api/tasks/${encodeURIComponent(state.buildTaskId)}/cancel`, {});
-            toast("已请求取消。");
-          } catch (e) {
-            toast(String(e.message || e), "bad");
-          }
-        },
-      },
-      "取消"
-    );
-
-    function updateProgressUI(t) {
-      if (!t) return;
-      const done = Number(t.done || 0);
-      const total = Number(t.total || 0);
-      const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((done / total) * 100))) : 0;
-      progressBar.firstChild.style.width = `${pct}%`;
-      const stage = humanTaskStage(t.stage);
-      const status = humanTaskStatus(t.status);
-      const detail = String(t.detail || "");
-      progressText.textContent = `${status} · ${stage} · ${done}/${total} ${detail ? "· " + detail : ""}`;
-    }
-
-    async function pollOnce() {
-      if (!state.buildTaskId) return;
-      if (!document.body.contains(progressText)) return stopBuildPolling();
-      try {
-        const t = await apiGet(`/api/tasks/${encodeURIComponent(state.buildTaskId)}`);
-        updateProgressUI(t);
-        if (t.status !== "running") {
-          stopBuildPolling();
-          state.buildTaskId = "";
-          localStorage.setItem("aiw.buildTaskId", "");
-          await refreshLibraryStatus();
-          if (t.status === "done") toast("建库完成。");
-          else if (t.status === "canceled") toast("建库已取消。", "bad");
-          else toast("建库失败：" + (t.error || ""), "bad", 6500);
-        }
-      } catch (e) {
-        stopBuildPolling();
-        toast(String(e.message || e), "bad");
-      }
-    }
-
-    function startBuildPolling() {
-      stopBuildPolling();
-      pollOnce();
-      state.buildPollTimer = window.setInterval(pollOnce, 1000);
-    }
-
-    function stopBuildPolling() {
-      if (state.buildPollTimer) window.clearInterval(state.buildPollTimer);
-      state.buildPollTimer = null;
-    }
-
-    root.appendChild(
-      el(
-        "div",
-        { class: "card" },
-        el("div", { class: "label" }, "1) 创建文献库"),
-        el("div", { class: "row" }, createName, createBtn),
-        el("div", { class: "muted" }, "创建后会自动切换到该库。库会存到本机数据目录（TopHumanWriting_data/…；兼容旧 AIWordDetector_data/）。")
-      )
-    );
-
-    root.appendChild(
-      el(
-        "div",
-        { class: "card" },
-        el("div", { class: "label" }, "2) 导入范文 PDF（浏览器选文件夹）"),
-        el("div", { class: "row" }, pickBtn, importBtn, clearImportBtn),
-        selectedInfo,
-        importProgressBar,
-        importProgressText,
-        el("div", { class: "muted" }, "说明：会把你选择的 PDF 拷贝进 TopHumanWriting_data/pdfs/（用于离线检索、打开来源）。")
-      )
-    );
-
-    root.appendChild(
-      el(
-        "div",
-        { class: "card" },
-        el("div", { class: "label" }, "3) 建索引（用于扫描/润色）"),
-        el("div", { class: "row" }, buildBtn, cancelBtn),
-        progressBar,
-        progressText,
-        el("div", { class: "muted" }, "提示：首次建库会占用 CPU；完成后“对齐扫描/润色/引用借鉴”才会有范文对照。")
-      )
-    );
-
-    root.appendChild(pdfInput);
-
-    // Initialize status when opening this page.
-    syncPdfRoot().catch(() => {});
-    if (state.buildTaskId) startBuildPolling();
-
+    renderGrid();
+    root.appendChild(grid);
     return root;
   }
 
   function pageScan() {
-    renderHeader("对齐扫描", "先找出“最不像范文”的句子（向量检索，不用 LLM）。");
+    renderHeader("找差距", "先找出“最不像范文”的句子，并给出对应的范文证据（可继续一键模仿改写）。");
     const root = el("div", { class: "grid", style: "gap:18px" });
 
     const text = el("textarea", { class: "textarea", placeholder: "粘贴你的正文（中英混合可）…" });
@@ -1252,10 +1809,13 @@
         class: "btn btn-primary",
         type: "button",
         onclick: async () => {
-          if (!state.library) return toast("请先选择文献库。", "bad");
+          if (!state.library) {
+            openPrepWizard({ need: "rag", resume: { route: "scan", autoKey: "aiw.scanAutoRun", autoValue: "1" } });
+            return toast("先准备范文库（第一次需要导入 PDF）。", "bad", 4500);
+          }
           if (!(state.libraryStatus && state.libraryStatus.rag_index)) {
-            toast("缺少范文索引：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
-            return openIndexModal("rag", state.libraryStatus || {});
+            openPrepWizard({ need: "rag", resume: { route: "scan", autoKey: "aiw.scanAutoRun", autoValue: "1" } });
+            return toast("范文库还没准备好：先完成一次“导入 + 准备”。", "bad", 4500);
           }
           const raw = (text.value || "").trim();
           if (!raw) return toast("请先粘贴文本。", "bad");
@@ -1276,24 +1836,19 @@
             if (!maybeOpenIndexModalForError(msg)) toast(msg, "bad", 6500);
           } finally {
             runBtn.disabled = false;
-            runBtn.textContent = "开始扫描";
+            runBtn.textContent = "开始找差距";
           }
         },
       },
-      "开始扫描"
+      "开始找差距"
     );
 
     const resultsBox = el("div", { class: "card" });
     function renderEmptyResultsHint() {
       clear(resultsBox);
       if (!state.library) {
-        resultsBox.appendChild(el("div", { class: "muted" }, "请先在顶部选择文献库。"));
-        return;
-      }
-      const ragOk = !!(state.libraryStatus && state.libraryStatus.rag_index);
-      if (!ragOk) {
-        resultsBox.appendChild(el("div", { class: "label" }, "还不能扫描：缺少范文索引"));
-        resultsBox.appendChild(el("div", { class: "muted" }, "先到“文献库”完成：导入 PDF → 建索引。完成后再回来扫描。"));
+        resultsBox.appendChild(el("div", { class: "label" }, "还不能开始：请先准备范文库"));
+        resultsBox.appendChild(el("div", { class: "muted" }, "准备一次后，就能对白箱对照：哪里不像范文、参考哪段范文、怎么改更像。"));
         resultsBox.appendChild(
           el(
             "div",
@@ -1303,9 +1858,31 @@
               {
                 class: "btn btn-primary",
                 type: "button",
-                onclick: () => openIndexModal("rag", state.libraryStatus || {}),
+                onclick: () => openPrepWizard({ need: "rag", resume: { route: "scan" } }),
               },
-              "查看如何建索引"
+              "一键准备范文库"
+            ),
+            el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "去范文库页")
+          )
+        );
+        return;
+      }
+      const ragOk = !!(state.libraryStatus && state.libraryStatus.rag_index);
+      if (!ragOk) {
+        resultsBox.appendChild(el("div", { class: "label" }, "还不能扫描：范文库未准备好"));
+        resultsBox.appendChild(el("div", { class: "muted" }, "第一次需要导入同领域 PDF，并在本地生成“范文证据库”。完成后才能对白箱对照。"));
+        resultsBox.appendChild(
+          el(
+            "div",
+            { class: "row" },
+            el(
+              "button",
+              {
+                class: "btn btn-primary",
+                type: "button",
+                onclick: () => openPrepWizard({ need: "rag", resume: { route: "scan" } }),
+              },
+              "一键准备范文库"
             ),
             el(
               "button",
@@ -1314,7 +1891,7 @@
                 type: "button",
                 onclick: () => setRoute("library"),
               },
-              "去文献库"
+              "去范文库页"
             )
           )
         );
@@ -1392,13 +1969,13 @@
         el("span", { class: "label" }, "最多扫描句子"),
         maxItems,
         runBtn,
-        el("span", { class: "muted" }, "扫描仅做检索：不调用 LLM。")
+        el("span", { class: "muted" }, "找差距只做对照：不生成内容。")
       )
     );
     root.appendChild(
       el(
         "div",
-        { class: "grid two", style: "gap:18px; align-items:start; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr)" },
+        { class: "grid two", style: "gap:18px; align-items:start" },
         inputCard,
         resultsBox
       )
@@ -1413,11 +1990,20 @@
         } catch {}
       }, 80);
     }
+    const auto = localStorage.getItem("aiw.scanAutoRun") || "";
+    if (auto) {
+      localStorage.removeItem("aiw.scanAutoRun");
+      window.setTimeout(() => {
+        try {
+          runBtn.click();
+        } catch {}
+      }, 120);
+    }
     return root;
   }
 
   function pagePolish() {
-    renderHeader("对齐润色", "白箱：范文对照 + 证据引用 + 受控改写（默认离线本地模型，可切换 API）。");
+    renderHeader("模仿改写", "白箱：参考哪段范文 → 哪里不像 → 怎么改更像（默认离线本地模型，可选 API）。");
     const root = el("div", { class: "grid", style: "gap:18px" });
 
     const selected = el("textarea", { class: "textarea", placeholder: "选中要润色的句子/段落…" });
@@ -1456,7 +2042,7 @@
       } catch {}
     }
 
-    const topk = el("input", { class: "input", value: "8", style: "width:110px", inputmode: "numeric", title: "检索多少条范文片段作为证据（C1..Ck）" });
+    const topk = el("input", { class: "input", value: "8", style: "width:110px", inputmode: "numeric", title: "检索多少条范文片段作为证据（越大越慢）" });
     const storedMaxTok = Number(localStorage.getItem("aiw.polishMaxTokens") || "");
     const providerDefault = localStorage.getItem("aiw.llmProvider") || "local";
     const maxTokDefault = Number.isFinite(storedMaxTok) && storedMaxTok > 0 ? storedMaxTok : providerDefault === "api" ? 4096 : 650;
@@ -1490,17 +2076,17 @@
     const advRow = el(
       "div",
       { class: "row", style: `display:${advOpen ? "flex" : "none"}` },
-      el("span", { class: "label" }, "LLM"),
+      el("span", { class: "label" }, "模型"),
       providerSel,
       el("span", { class: "label" }, "输出长度"),
       maxTok,
-      el("span", { class: "muted" }, "温度固定 0（尽量不发散）。API 需先在“LLM 设置”配置。")
+      el("span", { class: "muted" }, "温度固定 0（尽量不发散）。API 需先在“模型设置”配置。")
     );
 
     const exemplarsBox = el("div", { class: "card" });
     const outBox = el("div", { class: "card" });
 
-    function renderExemplars(exs, title = "范文对照（将被引用为 C1..Ck）") {
+    function renderExemplars(exs, title = "范文对照（将作为证据引用）") {
       clear(exemplarsBox);
       exemplarsBox.appendChild(el("div", { class: "label" }, title));
       exemplarsBox.appendChild(exemplarList(exs || [], { library: state.library }));
@@ -1509,48 +2095,135 @@
     function renderExemplarsEmpty() {
       clear(exemplarsBox);
       if (!state.library) {
-        exemplarsBox.appendChild(el("div", { class: "muted" }, "请先在顶部选择文献库。"));
-        return;
-      }
-      const ragOk = !!(state.libraryStatus && state.libraryStatus.rag_index);
-      if (!ragOk) {
-        exemplarsBox.appendChild(el("div", { class: "label" }, "缺少范文索引"));
-        exemplarsBox.appendChild(el("div", { class: "muted" }, "先到“文献库”完成：导入 PDF → 建索引。完成后再回来润色。"));
+        exemplarsBox.appendChild(el("div", { class: "label" }, "还不能开始：请先准备范文库"));
+        exemplarsBox.appendChild(el("div", { class: "muted" }, "准备一次后，润色会显示：参考哪段范文、哪里不像、怎么改更像。"));
         exemplarsBox.appendChild(
           el(
             "div",
             { class: "row" },
             el(
               "button",
-              { class: "btn btn-primary", type: "button", onclick: () => openIndexModal("rag", state.libraryStatus || {}) },
-              "查看如何建索引"
+              {
+                class: "btn btn-primary",
+                type: "button",
+                onclick: () => openPrepWizard({ need: "rag", resume: { route: "polish" } }),
+              },
+              "一键准备范文库"
             ),
-            el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "去文献库")
+            el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "去范文库页")
           )
         );
         return;
       }
-      exemplarsBox.appendChild(el("div", { class: "muted" }, "先获取范文对照（C1..Ck），再生成白箱润色。"));
+      const ragOk = !!(state.libraryStatus && state.libraryStatus.rag_index);
+      if (!ragOk) {
+        exemplarsBox.appendChild(el("div", { class: "label" }, "还不能润色：范文库未准备好"));
+        exemplarsBox.appendChild(el("div", { class: "muted" }, "第一次需要导入同领域 PDF，并在本地生成“范文证据库”。完成后才能白箱对照。"));
+        exemplarsBox.appendChild(
+          el(
+            "div",
+            { class: "row" },
+            el(
+              "button",
+              { class: "btn btn-primary", type: "button", onclick: () => openPrepWizard({ need: "rag", resume: { route: "polish" } }) },
+              "一键准备范文库"
+            ),
+            el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "去范文库页")
+          )
+        );
+        return;
+      }
+      exemplarsBox.appendChild(el("div", { class: "muted" }, "先获取范文对照（证据），再生成模仿改写。"));
     }
 
     function renderOutEmpty() {
       clear(outBox);
       outBox.appendChild(el("div", { class: "label" }, "白箱输出将在这里展示"));
       outBox.appendChild(el("div", { class: "muted" }, "包含：对齐度对比（原文/轻改/中改） + 诊断（带证据） + 改写（带引用）。"));
-      outBox.appendChild(el("div", { class: "muted" }, "建议流程：先点“获取范文对照”确认证据 → 再点“生成对齐润色”。"));
+      outBox.appendChild(el("div", { class: "muted" }, "建议流程：先点“获取范文对照”确认证据 → 再点“生成模仿改写”。"));
     }
 
-    function renderOutGenerating(provider) {
+    let genUiTimer = null;
+    function stopGenUiTimer() {
+      if (genUiTimer) window.clearInterval(genUiTimer);
+      genUiTimer = null;
+    }
+
+    function renderOutGenerating(provider, onCancel) {
+      stopGenUiTimer();
       clear(outBox);
       const p = String(provider || "").toLowerCase();
-      const title = p === "api" ? "生成中…（API 请求中）" : "生成中…（首次会加载模型）";
+      const title = p === "api" ? "生成中…（API 请求中）" : "生成中…（本地模型运行中）";
+
+      const stage = el("div", { class: "muted" }, "阶段：准备中…");
+      const timeEl = el("div", { class: "muted mono" }, "耗时：0s");
+      const bar = el("div", { class: "progress" }, el("div"));
+
+      const stages = [
+        "检索范文证据（可追溯）",
+        "生成诊断（哪里不像 + 句式模板）",
+        "生成改写（轻改/中改）",
+        "白箱校验（不增事实/不增数字/引用可追溯）",
+      ];
+      const ul = el("ul", { style: "margin:10px 0 0 18px" }, ...stages.map((t) => el("li", null, t)));
+
+      let pct = 6;
+      const start = Date.now();
+      const inner = bar.firstChild;
+      inner.style.width = `${pct}%`;
+
+      const cancelBtn =
+        typeof onCancel === "function"
+          ? el(
+              "button",
+              {
+                class: "btn btn-danger btn-small",
+                type: "button",
+                onclick: async () => {
+                  cancelBtn.disabled = true;
+                  cancelBtn.textContent = "取消中…";
+                  try {
+                    await onCancel();
+                  } catch {}
+                },
+              },
+              "取消生成"
+            )
+          : null;
+
       outBox.appendChild(el("div", { class: "label" }, title));
       outBox.appendChild(el("div", { class: "muted" }, "请稍等：会输出“诊断 + 轻改/中改”，并附范文证据。"));
-      outBox.appendChild(el("div", { class: "progress" }, el("div", { style: "width:70%" })));
-      outBox.appendChild(el("div", { class: "muted" }, "如果长时间无响应：可尝试调大输出长度（API 建议 ≥ 4096）。"));
+      outBox.appendChild(ul);
+      outBox.appendChild(el("div", { class: "row", style: "justify-content:space-between; margin-top:10px" }, stage, timeEl));
+      outBox.appendChild(bar);
+      outBox.appendChild(
+        el(
+          "div",
+          { class: "row", style: "margin-top:10px" },
+          cancelBtn,
+          el("div", { class: "muted" }, "提示：若失败，多数是输出长度太小导致 JSON 截断；API 建议 ≥ 4096。")
+        )
+      );
+
+      genUiTimer = window.setInterval(() => {
+        const elapsed = Date.now() - start;
+        timeEl.textContent = `耗时：${Math.floor(elapsed / 1000)}s`;
+
+        // Pseudo progress: keep moving but never "complete" before the response returns.
+        pct = Math.min(92, pct + (p === "api" ? 0.35 : 0.55));
+        inner.style.width = `${Math.floor(pct)}%`;
+
+        // Stage hints by time (heuristic).
+        let idx = 0;
+        if (elapsed > 1200) idx = 1;
+        if (elapsed > 5200) idx = 2;
+        if (elapsed > 14000) idx = 3;
+        stage.textContent = `阶段：${stages[Math.min(idx, stages.length - 1)]}`;
+      }, 240);
     }
 
     function renderOutError(msg) {
+      stopGenUiTimer();
       clear(outBox);
       outBox.appendChild(el("div", { class: "label" }, "生成失败"));
       outBox.appendChild(el("div", { class: "quote" }, msg || "未知错误。"));
@@ -1572,7 +2245,7 @@
             },
             "打开高级设置"
           ),
-          el("button", { class: "btn", type: "button", onclick: () => setRoute("llm") }, "去 LLM 设置")
+          el("button", { class: "btn", type: "button", onclick: () => setRoute("llm") }, "去模型设置")
         )
       );
     }
@@ -1581,11 +2254,13 @@
     renderOutEmpty();
 
     async function fetchExemplars() {
-      if (!state.library) return toast("请先选择文献库。", "bad");
+      if (!state.library) {
+        openPrepWizard({ need: "rag", resume: { route: "polish", autoKey: "aiw.polishAutoRun", autoValue: "exemplars" } });
+        return toast("先准备范文库（第一次需要导入 PDF）。", "bad", 4500);
+      }
       if (!(state.libraryStatus && state.libraryStatus.rag_index)) {
-        toast("缺少范文索引：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
-        openIndexModal("rag", state.libraryStatus || {});
-        throw new Error("rag index missing (build library first)");
+        openPrepWizard({ need: "rag", resume: { route: "polish", autoKey: "aiw.polishAutoRun", autoValue: "exemplars" } });
+        return toast("范文库还没准备好：先完成一次“导入 + 准备”。", "bad", 4500);
       }
       const txt = (selected.value || "").trim();
       if (txt.length < 8) return toast("选中文本太短。", "bad");
@@ -1607,6 +2282,7 @@
     }
 
     function renderPolishResult(r) {
+      stopGenUiTimer();
       clear(outBox);
       const result = r && r.result;
       if (!result) {
@@ -1625,12 +2301,12 @@
 
       const llmInfo = (r && r.llm) || null;
       if (llmInfo && llmInfo.provider === "api") {
-        outBox.appendChild(el("div", { class: "muted" }, `LLM：API · ${llmInfo.model || "—"} · ${llmInfo.base_url || "—"}`));
+        outBox.appendChild(el("div", { class: "muted" }, `模型：API · ${llmInfo.model || "—"} · ${llmInfo.base_url || "—"}`));
       } else if (llmInfo && llmInfo.provider === "local") {
         const mp = String(llmInfo.model_path || "");
-        outBox.appendChild(el("div", { class: "muted" }, `LLM：${mp ? mp.split(/[\\\\/]/).pop() : "—"}（本地）`));
+        outBox.appendChild(el("div", { class: "muted" }, `模型：${mp ? mp.split(/[\\\\/]/).pop() : "—"}（本地）`));
       } else if (state.llm && state.llm.model_path) {
-        outBox.appendChild(el("div", { class: "muted" }, `LLM：${String(state.llm.model_path).split(/[\\\\/]/).pop()}（本地）`));
+        outBox.appendChild(el("div", { class: "muted" }, `模型：${String(state.llm.model_path).split(/[\\\\/]/).pop()}（本地）`));
       }
 
       // White-box alignment score before/after (retrieval-only, no LLM).
@@ -1684,7 +2360,7 @@
 
         outBox.appendChild(el("div", { class: "hr" }));
         outBox.appendChild(el("div", { class: "label" }, "对齐度（检索得分，越高越像范文）"));
-        outBox.appendChild(el("div", { class: "muted" }, "说明：该分数来自向量检索（不调用 LLM），用于量化“改写后是否更像范文”。"));
+        outBox.appendChild(el("div", { class: "muted" }, "说明：该分数来自离线检索（不生成内容），用于量化“改写后是否更像范文”。"));
         outBox.appendChild(wrap);
       }
 
@@ -1709,7 +2385,7 @@
               ? el(
                   "div",
                   { class: "row", style: "gap:8px; margin-top:8px" },
-                  el("span", { class: "muted" }, "Scaffold"),
+                  el("span", { class: "muted" }, "句式模板"),
                   ...scaffolds.map((p) =>
                     el(
                       "button",
@@ -1721,7 +2397,7 @@
                           const ev2 = e || window.event;
                           if (ev2 && ev2.shiftKey) {
                             insertAtCursor(selected, p);
-                            toast("已插入 scaffold。");
+                            toast("已插入句式模板。");
                             return;
                           }
                           copyText(p);
@@ -1830,7 +2506,7 @@
                         const ev2 = e || window.event;
                         if (ev2 && ev2.shiftKey) {
                           insertAtCursor(selected, p);
-                          toast("已插入 scaffold。");
+                          toast("已插入句式模板。");
                           return;
                         }
                         copyText(p);
@@ -1888,10 +2564,13 @@
         class: "btn btn-primary",
         type: "button",
         onclick: async () => {
-          if (!state.library) return toast("请先选择文献库。", "bad");
+          if (!state.library) {
+            openPrepWizard({ need: "rag", resume: { route: "polish", autoKey: "aiw.polishAutoRun", autoValue: "generate" } });
+            return toast("先准备范文库（第一次需要导入 PDF）。", "bad", 4500);
+          }
           if (!(state.libraryStatus && state.libraryStatus.rag_index)) {
-            toast("缺少范文索引：请先到“文献库”导入 PDF 并建索引。", "bad", 4500);
-            return openIndexModal("rag", state.libraryStatus || {});
+            openPrepWizard({ need: "rag", resume: { route: "polish", autoKey: "aiw.polishAutoRun", autoValue: "generate" } });
+            return toast("范文库还没准备好：先完成一次“导入 + 准备”。", "bad", 4500);
           }
           const txt = (selected.value || "").trim();
           if (txt.length < 8) return toast("选中文本太短。", "bad");
@@ -1919,47 +2598,79 @@
           }
 
           genBtn.disabled = true;
-          genBtn.textContent = provider === "api" ? "生成中…（API 请求中）" : "生成中…（首次会加载模型）";
-          renderOutGenerating(provider);
+          genBtn.textContent = provider === "api" ? "生成中…（API 请求中）" : "生成中…（本地模型运行中）";
+
+          // Allow cancel: abort the HTTP request; for local model also stop llama-server.
+          const abort = new AbortController();
+          let canceled = false;
+          const onCancel = async () => {
+            if (canceled) return;
+            canceled = true;
+            try {
+              abort.abort();
+            } catch {}
+            if (provider !== "api") {
+              try {
+                await apiPost("/api/llm/stop", {});
+              } catch {}
+              await refreshLLMStatus().catch(() => {});
+            }
+            toast("已取消生成。", "bad", 4500);
+          };
+
+          renderOutGenerating(provider, onCancel);
           try {
             outBox.scrollIntoView({ behavior: "smooth", block: "start" });
           } catch {}
           try {
             await refreshLLMStatus();
-            const r = await apiPost("/api/align/polish", {
-              library: state.library,
-              selected_text: txt,
-              top_k: Number(topk.value || 8),
-              generate: true,
-              provider,
-              temperature: 0.0,
-              max_tokens: maxTokens,
-              retries: 2,
-            });
+            const r = await apiPost(
+              "/api/align/polish",
+              {
+                library: state.library,
+                selected_text: txt,
+                top_k: Number(topk.value || 8),
+                generate: true,
+                provider,
+                temperature: 0.0,
+                max_tokens: maxTokens,
+                retries: 2,
+              },
+              { signal: abort.signal }
+            );
             await refreshLLMStatus();
-            if (r && r.exemplars) renderExemplars(r.exemplars || [], "本次生成使用的范文对照（C1..Ck）");
+            if (r && r.exemplars) renderExemplars(r.exemplars || [], "本次生成使用的范文对照（证据）");
             renderPolishResult(r);
             toast("生成完成。");
           } catch (e) {
+            const isAbort =
+              (e && typeof e === "object" && (e.name === "AbortError" || e.code === "ABORT_ERR")) ||
+              String(e && (e.message || e) ? e.message || e : e)
+                .toLowerCase()
+                .includes("abort");
+            if (isAbort || canceled) {
+              renderOutError("已取消生成（没有产生输出）。你可以修改文本后重新生成。");
+              return;
+            }
             await refreshLLMStatus().catch(() => {});
             let msg = String(e && (e.message || e) ? e.message || e : e);
             if (msg.includes("LLM output invalid") && msg.includes("bad json")) {
               msg =
                 "生成结果格式不完整（常见原因：输出长度太小或 API 推理占用大量 tokens）。请打开“高级设置”，把输出长度调大（本地建议 ≥ 650；API 建议 ≥ 4096）后重试。";
             } else if (msg.includes("failed to start llama-server")) {
-              msg = "启动本地模型失败：请到“LLM 设置”页点击“一键启动&测试”。";
+              msg = "启动本地模型失败：请到“模型设置”页点击“一键启动&测试”。";
             } else if (maybeOpenIndexModalForError(msg)) {
               msg = "";
             } else if (msg.includes("missing api key")) {
-              msg = "未配置大模型 API：请到“LLM 设置”页填写/测试，或设置环境变量 SKILL_LLM_API_KEY / OPENAI_API_KEY。";
+              msg = "未配置大模型 API：请到“模型设置”页填写/测试，或设置环境变量 SKILL_LLM_API_KEY / OPENAI_API_KEY。";
             } else if (msg.includes("missing base_url")) {
-              msg = "未配置 API URL：请到“LLM 设置”页填写 base_url（通常以 /v1 结尾），或设置 SKILL_LLM_BASE_URL / OPENAI_BASE_URL。";
+              msg = "未配置 API URL：请到“模型设置”页填写 base_url（通常以 /v1 结尾），或设置 SKILL_LLM_BASE_URL / OPENAI_BASE_URL。";
             } else if (msg.includes("missing model")) {
-              msg = "未配置 API 模型名：请到“LLM 设置”页填写 model，或设置 SKILL_LLM_MODEL / OPENAI_MODEL。";
+              msg = "未配置 API 模型名：请到“模型设置”页填写 model，或设置 SKILL_LLM_MODEL / OPENAI_MODEL。";
             } else if (msg.includes("api request failed") && msg.includes("http 401")) {
-              msg = "API 鉴权失败（401）：请检查 api_key 是否正确，或到“LLM 设置”页先点“测试 API”。";
+              msg = "API 鉴权失败（401）：请检查 api_key 是否正确，或到“模型设置”页先点“测试 API”。";
             } else if (msg.includes("api request failed") && msg.includes("http 403")) {
-              msg = "API 拒绝访问（403）：可能是 key/权限不足、白名单限制或网关不支持 /v1/chat/completions。请到“LLM 设置”页先点“测试 API”。";
+              msg = "API 拒绝访问（403）：可能是 key/权限不足、白名单限制或网关不支持 /v1/chat/completions。请到“模型设置”页先点“测试 API”。";
             } else if (msg.includes("api request failed") && msg.includes("http 429")) {
               msg = "API 触发限流（429）：请稍后重试，或降低频率/更换模型。";
             }
@@ -1969,11 +2680,11 @@
             }
           } finally {
             genBtn.disabled = false;
-            genBtn.textContent = "生成对齐润色";
+            genBtn.textContent = "生成模仿改写";
           }
         },
       },
-      "生成对齐润色"
+      "生成模仿改写"
     );
 
     const advBtn = el(
@@ -2006,14 +2717,14 @@
         advBtn
       ),
       advRow,
-      el("div", { class: "muted" }, "提示：先“获取范文对照”再生成，能更清楚看到 C1..Ck 是哪些证据。")
+      el("div", { class: "muted" }, "提示：先“获取范文对照”再生成，能更清楚看到使用了哪些范文证据。")
     );
 
     const leftCol = el("div", { class: "grid", style: "gap:18px" }, inputCard, outBox);
 
     const topGrid = el(
       "div",
-      { class: "grid two", style: "gap:18px; align-items:start; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr)" },
+      { class: "grid two", style: "gap:18px; align-items:start" },
       leftCol,
       exemplarsBox
     );
@@ -2033,7 +2744,7 @@
   }
 
   function pageCite() {
-    renderHeader("引用借鉴", "抽取“引用句子 + 参考文献”，构建可检索的范文句式库（白箱）。");
+    renderHeader("引用写法", "从范文中抽取“引用句子 + 参考文献”，用于白箱检索可借鉴的引用表达。");
     const root = el("div", { class: "grid", style: "gap:18px" });
 
     const statusBox = el("div", { class: "card" }, el("div", { class: "muted" }, "正在读取引用库状态…"));
@@ -2041,7 +2752,16 @@
     async function syncStatus() {
       if (!state.library) {
         clear(statusBox);
-        statusBox.appendChild(el("div", { class: "muted" }, "请先选择文献库。"));
+        statusBox.appendChild(el("div", { class: "label" }, "还不能开始：请先准备范文库"));
+        statusBox.appendChild(el("div", { class: "muted" }, "引用写法需要先有范文库（PDF）作为证据来源。"));
+        statusBox.appendChild(
+          el(
+            "div",
+            { class: "row" },
+            el("button", { class: "btn btn-primary", type: "button", onclick: () => openPrepWizard({ need: "cite", resume: { route: "cite" } }) }, "一键准备"),
+            el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "去范文库页")
+          )
+        );
         return;
       }
       try {
@@ -2060,11 +2780,11 @@
           )
         );
         if (!ok) {
-          statusBox.appendChild(el("div", { class: "muted" }, "提示：先建好“范文索引”后，再抽取引用句子会更顺。"));
+          statusBox.appendChild(el("div", { class: "muted" }, "提示：先准备好范文库，再抽取引用写法会更顺。"));
         }
       } catch (e) {
         clear(statusBox);
-        statusBox.appendChild(el("div", { class: "muted" }, "无法读取引用库状态（可先建库）。"));
+        statusBox.appendChild(el("div", { class: "muted" }, "无法读取引用库状态（可先准备范文库）。"));
       }
     }
 
@@ -2081,7 +2801,10 @@
         class: "btn btn-primary",
         type: "button",
         onclick: async () => {
-          if (!state.library) return toast("请先选择文献库。", "bad");
+          if (!state.library) {
+            openPrepWizard({ need: "cite", resume: { route: "cite" } });
+            return toast("先准备范文库（可选：同时准备引用写法）。", "bad", 4500);
+          }
           buildBtn.disabled = true;
           buildBtn.textContent = "启动中…";
           try {
@@ -2097,11 +2820,11 @@
             toast(String(e.message || e), "bad", 6500);
           } finally {
             buildBtn.disabled = false;
-            buildBtn.textContent = "抽取引用句子（建引用库）";
+            buildBtn.textContent = "准备引用写法（抽取引用证据）";
           }
         },
       },
-      "抽取引用句子（建引用库）"
+      "准备引用写法（抽取引用证据）"
     );
 
     const citeProgress = el("div", { class: "progress" }, el("div"));
@@ -2178,7 +2901,10 @@
         class: "btn btn-primary",
         type: "button",
         onclick: async () => {
-          if (!state.library) return toast("请先选择文献库。", "bad");
+          if (!state.library) {
+            openPrepWizard({ need: "cite", resume: { route: "cite", autoKey: "aiw.citeAutoRun", autoValue: "1" } });
+            return toast("先准备范文库（可选：同时准备引用写法）。", "bad", 4500);
+          }
           const q = (query.value || "").trim();
           if (!q) return toast("请输入搜索关键词。", "bad");
           searchBtn.disabled = true;
@@ -2193,11 +2919,11 @@
             if (!maybeOpenIndexModalForError(msg)) toast(msg, "bad", 6500);
           } finally {
             searchBtn.disabled = false;
-            searchBtn.textContent = "检索引用句式";
+            searchBtn.textContent = "检索引用写法";
           }
         },
       },
-      "检索引用句式"
+      "检索引用写法"
     );
 
     const resultsBox = el("div", { class: "card" }, el("div", { class: "muted" }, "检索结果将在这里显示。"));
@@ -2305,7 +3031,7 @@
       el(
         "div",
         { class: "card" },
-        el("div", { class: "label" }, "构建引用库（一次即可，离线保存）"),
+        el("div", { class: "label" }, "准备引用写法（一次即可，离线保存）"),
         el("div", { class: "row" }, maxPages, buildBtn, citeCancelBtn),
         citeProgress,
         citeProgressText,
@@ -2319,7 +3045,7 @@
       el(
         "div",
         { class: "card" },
-        el("div", { class: "label" }, "检索范文引用句式"),
+        el("div", { class: "label" }, "检索引用写法"),
         el("div", { class: "row" }, query, el("span", { class: "label" }, "返回条数"), topk, searchBtn),
         el("div", { class: "muted" }, "用途：找“顶级论文怎么写这句话/怎么引文”，并复制句式（白箱可追溯）。")
       )
@@ -2343,28 +3069,28 @@
   }
 
   function pageLLM() {
-    renderHeader("LLM 设置", "支持：本地模型（离线） / 大模型 API（可选）。");
+    renderHeader("模型设置", "可选：用本地模型离线生成（推荐），或切换到你自己的大模型 API。");
     const root = el("div", { class: "grid", style: "gap:18px" });
 
     const providerSel = el(
       "select",
       { class: "select", style: "width:220px" },
-      el("option", { value: "local" }, "默认用本地 Qwen（离线）"),
-      el("option", { value: "api" }, "默认用大模型 API")
+      el("option", { value: "local" }, "默认用本地模型（离线）"),
+      el("option", { value: "api" }, "默认用大模型 API（可选）")
     );
     providerSel.value = localStorage.getItem("aiw.llmProvider") || "local";
     providerSel.addEventListener("change", () => {
       localStorage.setItem("aiw.llmProvider", providerSel.value || "local");
       refreshLLMStatus().catch(() => {});
-      toast("已更新润色默认 LLM。");
+      toast("已更新默认模型。");
     });
 
     root.appendChild(
       el(
         "div",
         { class: "card" },
-        el("div", { class: "label" }, "润色默认使用"),
-        el("div", { class: "row" }, providerSel, el("span", { class: "muted" }, "也可在“对齐润色 → 高级设置”临时切换。"))
+        el("div", { class: "label" }, "模仿改写默认使用"),
+        el("div", { class: "row" }, providerSel, el("span", { class: "muted" }, "也可在“模仿改写 → 高级设置”临时切换。"))
       )
     );
 
@@ -2376,7 +3102,7 @@
     const ngl = el("input", { class: "input", style: "width:110px", value: "0", inputmode: "numeric" });
     const sleep = el("input", { class: "input", style: "width:130px", value: "300", inputmode: "numeric" });
 
-    const localStatusBox = el("div", { class: "card" }, el("div", { class: "muted" }, "正在读取本地 LLM 状态…"));
+    const localStatusBox = el("div", { class: "card" }, el("div", { class: "muted" }, "正在读取本地模型状态…"));
 
     async function syncLocalFromStatus() {
       await refreshLLMStatus();
@@ -2442,7 +3168,7 @@
               sleep_idle_seconds: Number(sleep.value || 300),
             });
             await syncLocalFromStatus();
-            toast(r.ok ? "本地 LLM 测试通过。" : "本地 LLM 测试失败。", r.ok ? "good" : "bad");
+            toast(r.ok ? "本地模型测试通过。" : "本地模型测试失败。", r.ok ? "good" : "bad");
           } catch (e) {
             await syncLocalFromStatus().catch(() => {});
             toast(String(e.message || e), "bad", 6500);
@@ -2464,7 +3190,7 @@
           try {
             await apiPost("/api/llm/stop", {});
             await syncLocalFromStatus();
-            toast("已停止本地 LLM。");
+            toast("已停止本地模型。");
           } catch (e) {
             toast(String(e.message || e), "bad");
           }
@@ -2654,7 +3380,7 @@
   }
 
   function pageHelp() {
-    renderHeader("使用帮助", "你要的是“像范文写法”的白箱过程：有范文背书，改法可追溯。");
+    renderHeader("新手教程", "目标：把句式写得更像范文 —— 并且每一步都有“范文证据”可追溯。");
     return el(
       "div",
       { class: "grid", style: "gap:18px" },
@@ -2665,18 +3391,18 @@
         el(
           "ol",
           null,
-          el("li", null, "文献库页：创建库 → 选择 PDF 文件夹 → 导入到本地库 → 开始建库（等待完成）。"),
-          el("li", null, "对齐扫描页：粘贴正文 → 扫描 → 找到对齐度低的句子。"),
-          el("li", null, "对齐润色页：点击“润色这个句子”或粘贴段落 → 获取范文对照 → 生成对齐润色。")
+          el("li", null, "范文库页：选择同领域 PDF → 一键准备（离线生成范文证据）。"),
+          el("li", null, "找差距页：粘贴正文 → 开始找差距 → 定位最不像范文的句子（带证据）。"),
+          el("li", null, "模仿改写页：粘贴句子/段落 → 获取范文对照 → 生成模仿改写（保守版/更像版）。")
         )
       ),
       el(
         "div",
         { class: "card" },
-        el("div", { class: "label" }, "Qwen 的作用在哪里？"),
-        el("div", null, "扫描：只做离线检索对照，不调用大模型。"),
-        el("div", null, "润色：默认调用本地 Qwen 输出 JSON（诊断 + 轻改/中改 + 引用证据）。也可切换到大模型 API（OpenAI 兼容）。"),
-        el("div", { class: "muted" }, "如何确认：对齐润色结果顶部会显示“LLM：…”；并展示“对齐度（检索得分）”对比原文/轻改/中改。")
+        el("div", { class: "label" }, "模型的作用在哪里？"),
+        el("div", null, "找差距：不生成内容，只负责“对照证据”。"),
+        el("div", null, "模仿改写：模型生成“哪里不像 + 怎么改更像 + 两种改法”，并引用本次用到的范文证据。"),
+        el("div", { class: "muted" }, "提示：默认温度固定 0（尽量不发散），更像“受控改写/模板化”而不是自由发挥。")
       )
     );
   }
@@ -2719,7 +3445,7 @@
     $("#librarySelect").addEventListener("change", async (e) => {
       state.library = e.target.value || "";
       localStorage.setItem("aiw.library", state.library);
-      toast(state.library ? `已切换文献库：${state.library}` : "未选择文献库。", state.library ? "good" : "bad");
+      toast(state.library ? `已切换范文库：${state.library}` : "未选择范文库。", state.library ? "good" : "bad");
       render().catch(() => {});
     });
 

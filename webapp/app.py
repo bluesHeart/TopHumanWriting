@@ -9,6 +9,7 @@ import threading
 import time
 import traceback
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -964,6 +965,90 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
         libs = library_manager.list_libraries()
         return {"libraries": libs}
 
+    def _count_pdfs(root: str) -> int:
+        if not root or not os.path.exists(root):
+            return 0
+        count = 0
+        try:
+            for _, _, files in os.walk(root):
+                for f in files:
+                    if str(f).lower().endswith(".pdf"):
+                        count += 1
+        except Exception:
+            return 0
+        return int(count)
+
+    def _read_json(path: str) -> dict:
+        try:
+            if path and os.path.exists(path):
+                import json as _json
+
+                with open(path, "r", encoding="utf-8") as f:
+                    d = _json.load(f)
+                return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+        return {}
+
+    @app.get("/api/libraries/summary")
+    def libraries_summary():
+        libs = library_manager.list_libraries()
+        out = []
+        for it in libs or []:
+            name = (it.get("name", "") if isinstance(it, dict) else "") or ""
+            name = str(name).strip()
+            if not name:
+                continue
+
+            pdf_import_root = _resolve_pdf_import_root(name)
+            pdf_import_count = _count_pdfs(pdf_import_root)
+
+            rag_ok = rag.index_ready(name)
+            cite_ok = cite.index_ready(name)
+
+            rag_manifest = {}
+            rag_pdf_root = ""
+            rag_pdf_count = 0
+            rag_built_at = 0
+            rag_built_at_iso = ""
+            if rag_ok:
+                try:
+                    ix = rag._indexer(name)  # type: ignore[attr-defined]
+                    rag_manifest = _read_json(getattr(ix, "manifest_path", "") or "")
+                    rag_pdf_root = str(rag_manifest.get("pdf_root", "") or "").strip()
+                    try:
+                        rag_pdf_count = int(rag_manifest.get("pdf_count", 0) or 0)
+                    except Exception:
+                        rag_pdf_count = 0
+                    try:
+                        rag_built_at = int(rag_manifest.get("built_at", 0) or 0)
+                    except Exception:
+                        rag_built_at = 0
+                    if rag_built_at > 0:
+                        try:
+                            rag_built_at_iso = datetime.fromtimestamp(rag_built_at).isoformat(sep=" ", timespec="seconds")
+                        except Exception:
+                            rag_built_at_iso = ""
+                except Exception:
+                    rag_manifest = {}
+
+            out.append(
+                {
+                    **(it if isinstance(it, dict) else {}),
+                    "name": name,
+                    "pdf_import_root": pdf_import_root,
+                    "pdf_import_count": int(pdf_import_count),
+                    "rag_index": bool(rag_ok),
+                    "cite_index": bool(cite_ok),
+                    "rag_manifest": rag_manifest,
+                    "rag_pdf_root": rag_pdf_root,
+                    "rag_pdf_count": int(rag_pdf_count),
+                    "rag_built_at": int(rag_built_at),
+                    "rag_built_at_iso": rag_built_at_iso,
+                }
+            )
+        return {"libraries": out}
+
     @app.post("/api/libraries")
     def create_library(payload: dict = Body(...)):
         name = (payload.get("name", "") or "").strip()
@@ -1453,7 +1538,8 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
                 raise HTTPException(status_code=500, detail="failed to start llama-server")
 
         lang = LanguageDetector.detect(selected)
-        prompt = build_polish_prompt(selected_text=selected, citations=c_list, language=lang, compact=(provider == "api"))
+        # Local 3B models on 8GB laptops benefit from shorter prompts (faster + less context pressure).
+        prompt = build_polish_prompt(selected_text=selected, citations=c_list, language=lang, compact=(provider != "api"))
         messages = [
             {"role": "system", "content": "Return STRICT JSON only."},
             {"role": "user", "content": prompt},
@@ -1469,6 +1555,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
         last_err = ""
         parsed = None
         for attempt in range(1, retries + 2):
+            timeout_s = 180.0 if provider == "api" else float(payload.get("timeout_s", 420.0) or 420.0)
             if provider == "api":
                 assert api_client is not None
                 status, resp = api_client.chat(
@@ -1476,7 +1563,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
                     temperature=temperature,
                     max_tokens=max_tokens,
                     response_format={"type": "json_object"},
-                    timeout_s=180.0,
+                    timeout_s=timeout_s,
                 )
             else:
                 status, resp = llm.chat(
@@ -1484,7 +1571,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath 
                     temperature=temperature,
                     max_tokens=max_tokens,
                     response_format={"type": "json_object"},
-                    timeout_s=180.0,
+                    timeout_s=timeout_s,
                 )
             if int(status or 0) != 200 or not isinstance(resp, dict):
                 last_err = f"http {status}"

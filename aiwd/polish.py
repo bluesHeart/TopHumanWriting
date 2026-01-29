@@ -57,11 +57,12 @@ def build_polish_prompt(
         rules = [
             "You are a writing editor. Rewrite USER_TEXT to better match EXEMPLARS style while preserving meaning.",
             "STYLE ALIGNMENT PRIORITY: sentence-level alignment (openers, transitions, clause order, academic phrasing). Borrow short scaffold phrases from exemplars (NOT full sentences).",
+            "SCAFFOLD PHRASES: choose a reusable substring you can paste verbatim into your rewrites (avoid subject/tense changes like examine->examines). Prefer neutral chunks like \"in this paper\", \"we contribute by\", \"consistent with\", \"overall\".",
             "NO META: do not mention AI/models or add disclaimers/apologies.",
             "PRESERVE VOICE: do not change narrative perspective (do not introduce 'we/our/I' if absent in USER_TEXT).",
             "Do NOT add new facts/claims/citations/numbers/entities. Do NOT introduce any digits unless already in USER_TEXT.",
             "Only cite from C1..Ck. WHITE-BOX: every diagnosis + rewrite must include evidence quotes that are exact substrings of the provided excerpts.",
-            "Return exactly 3 diagnosis items (actionable; include Scaffold: \"...\" copied verbatim from evidence).",
+            "Return 3 diagnosis items (actionable; include Scaffold: \"...\" copied verbatim from evidence). If you cannot make 3, return as many as you can (>=1).",
             "Return exactly 2 rewrites: level='light' and level='medium'. Each rewrite must include at least ONE scaffold phrase from exemplars (generic phrasing only).",
             "STRICT JSON ONLY (no markdown). No raw newlines inside JSON strings (replace with spaces).",
             "LANGUAGE: follow LANGUAGE_HINT; write diagnosis + rewrites in the same language as USER_TEXT.",
@@ -71,13 +72,14 @@ def build_polish_prompt(
             "You are a writing editor. Your job is to rewrite the user's text to better match the style of the exemplar excerpts.",
             "Goal: emulate exemplar writing style (structure, tone, academic phrasing, transitions) while preserving meaning.",
             "STYLE ALIGNMENT PRIORITY: focus on sentence-level alignment (openers, transitions, clause order, active/passive voice, nominalization). Prefer borrowing short scaffold phrases from exemplars (NOT full sentences).",
+            "SCAFFOLD PHRASES: choose a reusable substring you can paste verbatim into your rewrites (avoid subject/tense changes like examine->examines). Prefer neutral chunks like \"in this paper\", \"we contribute by\", \"consistent with\", \"overall\".",
             "NO META: do not mention AI, models, or provide disclaimers/apologies. Output only the requested JSON content.",
             "PRESERVE VOICE: do not change the narrative perspective (do not introduce 'we/our/I' if absent in USER_TEXT).",
             "Do NOT add new facts, new claims, new citations, new numbers, or new named entities.",
             "CRITICAL: do NOT introduce any digits (0-9) or year-like citations in rewrites unless they already appear in USER_TEXT. When borrowing scaffold phrases, exclude author/year parts and keep it generic.",
             "Only cite from the provided excerpts C1..Ck; do not invent sources.",
             "WHITE-BOX REQUIREMENT: every diagnosis item must be supported by at least one evidence quote copied verbatim from the provided excerpts.",
-            "Return exactly 3 diagnosis items: what is not exemplar-like + how to adjust to match exemplars, each with evidence. Prefer at least 2 items about sentence structure/phrasing patterns (not just word choice).",
+            "Return 3 diagnosis items: what is not exemplar-like + how to adjust to match exemplars, each with evidence. If you cannot make 3, return as many as you can (>=1). Prefer at least 2 items about sentence structure/phrasing patterns (not just word choice).",
             "DIAGNOSIS MUST BE ACTIONABLE: avoid vague advice like “use academic language”. Each suggestion must include 1-2 concrete scaffold phrases (3-12 words) that appear verbatim in the evidence quote, and explain how to use them (no author names/years unless already in USER_TEXT).",
             "SUGGESTION FORMAT (required): start suggestion with `Scaffold: \"...\"` (copy a reusable scaffold phrase from evidence), then explain the rewrite move in 1 sentence.",
             "Return exactly TWO rewrites: one with level='light' and one with level='medium'.",
@@ -282,6 +284,22 @@ def validate_polish_json(
         return suggestion.strip()
 
     diagnosis: List[DiagnosisItem] = []
+
+    def _looks_placeholder(s: str) -> bool:
+        s = (s or "").strip()
+        if not s:
+            return True
+        if re.fullmatch(r"[.\u2026…]+", s):
+            return True
+        if s.lower() in ("todo", "tbd", "n/a", "na"):
+            return True
+        return False
+
+    def _min_meaningful_len(s: str) -> int:
+        # Rough heuristic that works for zh/en/mixed (remove punctuation/whitespace).
+        s2 = re.sub(r"[\s\r\n\t\"'`.,;:!?()\[\]{}<>/\\\\|=_+\-—–…·•]+", "", (s or ""))
+        return len(s2)
+
     diagnosis_raw = data.get("diagnosis", [])
     if isinstance(diagnosis_raw, list):
         for it in diagnosis_raw:
@@ -290,6 +308,12 @@ def validate_polish_json(
             title = (it.get("title", "") or "").strip()
             problem = (it.get("problem", "") or "").strip()
             suggestion = (it.get("suggestion", "") or "").strip()
+            if _looks_placeholder(title) or _min_meaningful_len(title) < 3:
+                continue
+            if _looks_placeholder(suggestion) or _min_meaningful_len(suggestion) < 8:
+                continue
+            if _looks_placeholder(problem):
+                problem = ""
             ev_raw = it.get("evidence", [])
             ev: List[Citation] = []
             if isinstance(ev_raw, list):
@@ -331,6 +355,62 @@ def validate_polish_json(
                 suggestion2 = _ensure_scaffold_in_suggestion(suggestion, [c.quote for c in ev])
                 diagnosis.append(DiagnosisItem(title=title, problem=problem, suggestion=suggestion2, evidence=ev))
 
+    def _fallback_diagnosis_templates() -> List[Tuple[str, str, str]]:
+        if lang == "zh":
+            return [
+                ("句首/引出方式更像范文", "当前句子开头偏直白，缺少范文常见的铺垫与定位。", 'Scaffold: "" 用该句式做开头，先定位对象/范围，再给出核心信息。'),
+                ("衔接与逻辑过渡", "句间过渡较弱，读者难以把握承接/转折/因果关系。", 'Scaffold: "" 在关键处加入过渡短语，明确逻辑关系并调整语序。'),
+                ("表达更凝练、更学术", "措辞略分散或偏口语，信息密度不够。", 'Scaffold: "" 适度名词化/客观化并压缩冗余，使表达更像范文。'),
+            ]
+        # en / mixed
+        return [
+            ("More academic opener", "The sentence opens abruptly and lacks the academic framing in the exemplars.", 'Scaffold: "" Use this scaffold as the opener to frame scope before the main claim.'),
+            ("Smoother transitions", "Transitions are weak, making the logical relation less explicit.", 'Scaffold: "" Add a transition phrase and align clause order with the exemplars.'),
+            ("More concise academic phrasing", "Phrasing is verbose or conversational compared to the exemplars.", 'Scaffold: "" Replace informal wording with concise academic constructions without adding new facts.'),
+        ]
+
+    def _fill_missing_diagnosis(items: List[DiagnosisItem]) -> List[DiagnosisItem]:
+        out = list(items or [])
+        if len(out) >= 3:
+            return out[:3]
+
+        fb = _fallback_citations(max_items=3)
+        if not fb:
+            return out
+
+        templates = _fallback_diagnosis_templates()
+        used_titles = {d.title for d in out if d and d.title}
+        i = 0
+        while len(out) < 3:
+            title0, problem0, suggestion0 = templates[len(out) % len(templates)]
+            title = title0
+            if title in used_titles:
+                j = 2
+                while f"{title0} ({j})" in used_titles:
+                    j += 1
+                title = f"{title0} ({j})"
+            ev = [fb[i % len(fb)]]
+            i += 1
+            suggestion2 = _ensure_scaffold_in_suggestion(suggestion0, [c.quote for c in ev])
+            out.append(DiagnosisItem(title=title, problem=problem0, suggestion=suggestion2, evidence=ev))
+            used_titles.add(title)
+        return out[:3]
+
+    # Ensure stable, user-friendly diagnostics: always 3 actionable items (fill deterministically).
+    if len(diagnosis) < 3:
+        diagnosis = _fill_missing_diagnosis(diagnosis)
+    if len(diagnosis) > 3:
+        diagnosis = diagnosis[:3]
+
+    # Extract scaffold phrases once (used to enforce "style alignment" in rewrites).
+    scaffolds: List[str] = []
+    for d in diagnosis:
+        m = re.findall(r"(?i)\bscaffold\s*:\s*[\"']([^\"']+)[\"']", d.suggestion or "")
+        for p in m:
+            p = (p or "").strip()
+            if p and p not in scaffolds:
+                scaffolds.append(p)
+
     out_variants: List[RewriteVariant] = []
 
     for v in variants_raw:
@@ -341,6 +421,8 @@ def validate_polish_json(
             continue
         rewrite = (v.get("rewrite", "") or "").strip()
         if not rewrite:
+            continue
+        if _looks_placeholder(rewrite) or _min_meaningful_len(rewrite) < 12:
             continue
 
         if selected_text:
@@ -397,10 +479,54 @@ def validate_polish_json(
         if not cits:
             raise PolishValidationError("missing citations")
 
+        if scaffolds:
+            # Soft constraint: local 3B models can miss scaffold insertion. Do not hard-fail.
+            hit = False
+            if lang == "zh":
+                for p in scaffolds:
+                    if p and p in rewrite:
+                        hit = True
+                        break
+            else:
+                rw_low = rewrite.lower()
+                for p in scaffolds:
+                    p0 = (p or "").strip()
+                    if not p0:
+                        continue
+                    p_low = p0.lower()
+                    candidates = [p_low]
+                    for prefix in ("we ", "this paper ", "the paper ", "our paper ", "this study ", "the study "):
+                        if p_low.startswith(prefix):
+                            candidates.append(p_low[len(prefix) :].lstrip())
+                    # Also allow stripping a leading determiner-like phrase (helps voice preservation).
+                    candidates = [c.strip(" .,:;!?\t\r\n") for c in candidates if c.strip()]
+                    if any(c and c in rw_low for c in candidates):
+                        hit = True
+                        break
+            if not hit:
+                note = (
+                    "本次改写未直接使用上方“句式模板”（可复制插入后再生成/微调）。"
+                    if lang == "zh"
+                    else "This rewrite did not directly use a scaffold phrase (copy one above and retry if needed)."
+                )
+                if note not in changes2 and len(changes2) < 8:
+                    changes2.append(note)
+
         out_variants.append(RewriteVariant(level=level, rewrite=rewrite, changes=changes2, citations=cits))
 
     if not out_variants:
-        raise PolishValidationError("no valid variants")
+        # Last-resort fallback: keep UX unblocked even when the model output contains no usable variants.
+        fb = _fallback_citations(max_items=2)
+        note = (
+            "生成未包含改写文本：已保底返回原文。你仍可使用上方“句式模板”手动替换，或提高 max_tokens 后重试。"
+            if lang == "zh"
+            else "Rewrite text missing; returning original as fallback. Increase max_tokens and retry if needed."
+        )
+        base = selected_text or ""
+        out_variants = [
+            RewriteVariant(level="light", rewrite=base, changes=[note], citations=fb),
+            RewriteVariant(level="medium", rewrite=base, changes=[note], citations=fb),
+        ]
 
     # Deduplicate by level (keep first).
     seen = set()
@@ -410,5 +536,29 @@ def validate_polish_json(
             continue
         seen.add(v.level)
         uniq.append(v)
+
+    # Ensure both levels exist for UI consistency (fill with original text when missing).
+    have = {v.level for v in uniq}
+    fb = _fallback_citations(max_items=2)
+    base = selected_text or ""
+    if "light" not in have:
+        uniq.insert(
+            0,
+            RewriteVariant(
+                level="light",
+                rewrite=base,
+                changes=[("缺少轻改输出：已返回原文。" if lang == "zh" else "Missing light variant; returned original.")],
+                citations=fb,
+            ),
+        )
+    if "medium" not in have:
+        uniq.append(
+            RewriteVariant(
+                level="medium",
+                rewrite=base,
+                changes=[("缺少中改输出：已返回原文。" if lang == "zh" else "Missing medium variant; returned original.")],
+                citations=fb,
+            )
+        )
 
     return PolishResult(language=lang, diagnosis=diagnosis, variants=uniq)

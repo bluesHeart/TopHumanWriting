@@ -1031,6 +1031,9 @@ class LibraryManager:
             for f in os.listdir(self.libraries_dir):
                 if f.endswith('.json'):
                     name = f[:-5]  # Remove .json
+                    # Hide internal artifacts (e.g., "*.sentences.json") from user-facing lists.
+                    if name.endswith(".sentences"):
+                        continue
                     path = os.path.join(self.libraries_dir, f)
                     try:
                         with open(path, 'r', encoding='utf-8') as file:
