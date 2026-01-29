@@ -25,6 +25,10 @@ TopHumanWriting is an **offline local web app** for “aligning to top human exe
 
 If it stays on the startup page, open `TopHumanWriting_data/logs/launch.log` (or run `run_web.bat` to see errors).
 
+UI note (non-technical friendly):
+- Home follows: **choose library → choose mode → paste text → one-click run** (no jargon).
+- Align Polish has **one-click mimic rewrite** (auto evidence) + “view evidence only” (verify exemplars first).
+
 **From source (dev):**
 
 1. Run `setup_env.bat` (once)
@@ -101,6 +105,10 @@ TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范
 4. 浏览器会自动打开 `http://127.0.0.1:7860`（默认端口；若被占用会自动换端口）
 
 如果一直停在启动页：打开 `TopHumanWriting_data/logs/launch.log`（或用 `run_web.bat` 看报错）。
+
+UI 说明（面向非技术用户）：
+- 首页按 **选范文库 → 选模式 → 粘贴文本 → 一键运行** 设计，尽量不出现术语。
+- “对齐润色”默认提供 **一键模仿改写（自动带证据）**，另有 “只看范文证据” 方便先确认参考段落。
 
 **源码运行（开发）：**
 

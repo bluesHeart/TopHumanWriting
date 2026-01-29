@@ -1302,7 +1302,7 @@
     "This paper studies how risk premia vary with market conditions. We document strong cross-sectional dispersion and show that a parsimonious factor model explains most of the variation.";
 
   function pageHome() {
-    renderHeader("开始", "像专题库一样写作：选择同领域范文库 → 对照证据 → 受控改写（每条建议都有范文背书）。");
+    renderHeader("开始", "把句式写得更像范文：哪里不像 → 参考哪段范文 → 怎么改更像（可追溯、有背书）。");
 
     const root = el("div", { class: "home" });
     const inner = el("div", { class: "home-inner" });
@@ -1311,12 +1311,8 @@
       "div",
       { class: "home-hero" },
       el("div", { class: "home-title" }, "TopHumanWriting"),
-      el("div", { class: "home-sub" }, "模仿同领域顶级人类范文写法 · 避免 AI 味 · 每条建议都引用本次用到的范文证据"),
-      el(
-        "div",
-        { class: "home-kicker" },
-        "建议：先准备一次范文库（50–100 篇 PDF）。之后写作只做“对照 + 受控改写”。"
-      )
+      el("div", { class: "home-sub" }, "用你的“同领域顶级范文库”来对齐写法：每条建议都给范文证据（pdf+页码+原文子串）。"),
+      el("div", { class: "home-kicker" }, "第一次：准备范文库（建议 50–100 篇 PDF）。之后写作：复制文本 → 一键对齐。")
     );
 
     const modeKey = "aiw.homeMode";
@@ -1332,6 +1328,7 @@
     const clearBtn = el("button", { class: "btn btn-ghost", type: "button" }, "清空");
     const helpBtn = el("button", { class: "btn btn-ghost", type: "button" }, "新手教程");
     const prepBtn = el("button", { class: "btn", type: "button" }, "准备/更新范文库…");
+    const manageBtn = el("button", { class: "btn btn-ghost", type: "button" }, "管理范文库…");
 
     sampleBtn.onclick = () => {
       text.value = HOME_SAMPLE_TEXT;
@@ -1349,14 +1346,30 @@
 
     helpBtn.onclick = () => setRoute("help");
     prepBtn.onclick = () => openPrepWizard({ need: "rag" });
+    manageBtn.onclick = () => setRoute("library");
 
-    const toolCards = [];
+    const modeBtns = {};
 
-    function markToolActive() {
-      for (const it of toolCards) {
-        if (!it || !it.node) continue;
-        it.node.classList.toggle("active", it.id === mode);
+    const runBtn = el("button", { class: "btn btn-primary home-primary", type: "button" }, "一键模仿改写");
+    const runHint = el("div", { class: "muted home-runhint" }, "—");
+
+    function updateRunCopy() {
+      const m = String(mode || "polish");
+      if (m === "scan") {
+        runBtn.textContent = "开始找差距";
+        text.placeholder = "粘贴你的正文（可很长；会自动拆句）…";
+        runHint.textContent = "只做对照：不生成内容。会标出“最不像范文”的句子，并给出范文证据。";
+        return;
       }
+      if (m === "cite") {
+        runBtn.textContent = "检索引用写法";
+        text.placeholder = "输入一个引用问题/关键词（例如：consistent with / 据…）…";
+        runHint.textContent = "可选功能：从范文中检索常见引用表达（含证据与参考文献线索）。";
+        return;
+      }
+      runBtn.textContent = "一键模仿改写";
+      text.placeholder = "粘贴你要改的句子/段落（中英混合可）…";
+      runHint.textContent = "会输出：哪里不像 + 句式模板 + 轻改/中改，并附本次用到的范文证据（pdf+页码）。";
     }
 
     function setMode(next) {
@@ -1364,7 +1377,11 @@
       if (m !== "scan" && m !== "polish" && m !== "cite") return;
       mode = m;
       localStorage.setItem(modeKey, mode);
-      markToolActive();
+      for (const [id, b] of Object.entries(modeBtns)) {
+        if (!b) continue;
+        b.classList.toggle("active", id === mode);
+      }
+      updateRunCopy();
     }
 
     function runTool(nextMode) {
@@ -1430,193 +1447,71 @@
       }
     });
 
-    function toolCard(opts) {
-      const id = String(opts && opts.id ? opts.id : "").trim().toLowerCase();
-      const title = String(opts && opts.title ? opts.title : "").trim();
-      const subtitle = String(opts && opts.subtitle ? opts.subtitle : "").trim();
-      const icon = String(opts && opts.icon ? opts.icon : "").trim();
-      const primaryText = String(opts && opts.primaryText ? opts.primaryText : "").trim() || "开始";
-      const badges = Array.isArray(opts && opts.badges ? opts.badges : null) ? opts.badges : [];
-      const onRun = typeof opts.onRun === "function" ? opts.onRun : () => {};
+    updateRunCopy();
 
-      const badgeRow = el("div", { class: "topic-badges" });
-      for (const b of badges) badgeRow.appendChild(el("span", { class: "badge" }, String(b)));
+    const homeLibSel = el("select", { class: "select", style: "min-width:240px" });
+    function syncHomeLibSel() {
+      clear(homeLibSel);
+      homeLibSel.appendChild(el("option", { value: "" }, "— 选择范文库（专题库）—"));
+      for (const it of state.libraries || []) {
+        const name = String((it && it.name) || "").trim();
+        if (!name) continue;
+        homeLibSel.appendChild(el("option", { value: name }, name));
+      }
+      homeLibSel.value = state.library || "";
+    }
+    syncHomeLibSel();
+    homeLibSel.addEventListener("change", () => {
+      state.library = homeLibSel.value || "";
+      localStorage.setItem("aiw.library", state.library);
+      updateGlobalLibraryUI();
+      render().catch(() => {});
+    });
 
-      const btn = el(
-        "button",
-        {
-          class: "btn btn-primary",
-          type: "button",
-          onclick: (e) => {
-            try {
-              if (e && typeof e.stopPropagation === "function") e.stopPropagation();
-            } catch {}
-            onRun();
-          },
-        },
-        primaryText
-      );
-
-      const card = el(
-        "div",
-        { class: "card topic-card tool-card" + (mode === id ? " active" : ""), "data-mode": id },
-        el(
-          "div",
-          { class: "topic-head" },
-          el("div", { class: "topic-icon big", "aria-hidden": "true" }, icon),
-          el("div", { class: "topic-meta" }, el("div", { class: "topic-name" }, title), el("div", { class: "topic-sub" }, subtitle))
-        ),
-        badgeRow,
-        el("div", { class: "topic-actions" }, btn, el("button", { class: "btn btn-ghost", type: "button", onclick: () => setRoute("help") }, "查看例子"))
-      );
-
-      card.addEventListener("click", () => setMode(id));
-      toolCards.push({ id, node: card });
-      return card;
+    function modePill(id, icon, label) {
+      const b = el("button", { class: "pill mode" + (mode === id ? " active" : ""), type: "button" }, `${icon} ${label}`);
+      b.onclick = () => setMode(id);
+      modeBtns[id] = b;
+      return b;
     }
 
-    const toolGrid = el(
+    const modeRow = el(
       "div",
-      { class: "topic-grid home-tools" },
-      toolCard({
-        id: "scan",
-        icon: "🧭",
-        title: "找差距（先定位哪里不像）",
-        subtitle: "把正文拆成句子，找出“最不像范文”的句子，并展示对应范文证据。",
-        badges: ["不生成内容", "有证据", "可追溯"],
-        primaryText: "开始找差距",
-        onRun: () => runTool("scan"),
-      }),
-      toolCard({
-        id: "polish",
-        icon: "✨",
-        title: "模仿改写（写得更像范文）",
-        subtitle: "基于范文证据做受控改写：哪里不像 + 句式模板 + 两种改法（保守/更像）。",
-        badges: ["两版改写", "低发散", "有证据"],
-        primaryText: "生成模仿改写",
-        onRun: () => runTool("polish"),
-      }),
-      toolCard({
-        id: "cite",
-        icon: "🔖",
-        title: "引用写法（可选）",
-        subtitle: "检索范文里常见的引用表达（正文引用 + 参考文献），可直接借鉴。",
-        badges: ["可选功能", "有证据"],
-        primaryText: "检索引用写法",
-        onRun: () => runTool("cite"),
-      })
+      { class: "home-modes" },
+      modePill("polish", "✨", "模仿改写"),
+      modePill("scan", "🧭", "找差距"),
+      modePill("cite", "🔖", "引用写法")
     );
+
+    runBtn.onclick = () => runTool(mode);
 
     const inputCard = el(
       "div",
       { class: "card home-card" },
-      el("div", { class: "label" }, "你的文本"),
-      text,
-      el("div", { class: "home-subactions" }, prepBtn, helpBtn, sampleBtn, clearBtn),
-      el("div", { class: "muted" }, "建议流程：先用“找差距”定位不一致，再用“模仿改写”更像范文。快捷键：Ctrl+Enter 运行你上次选中的工具。")
-    );
-
-    const toolPanel = el(
-      "div",
-      { class: "card home-card home-tools-card" },
-      el("div", { class: "label" }, "选择你要做什么"),
-      toolGrid
-    );
-
-    const statusRow = el("div", { class: "home-status" });
-
-    function statusPill(label, ok, onClick) {
-      if (typeof onClick !== "function") {
-        return el("span", { class: "pill small static " + (ok ? "ok" : "bad") }, label);
-      }
-      const b = el("button", { class: "pill small " + (ok ? "ok" : "bad"), type: "button" }, label);
-      b.onclick = onClick;
-      return b;
-    }
-
-    function renderStatus() {
-      clear(statusRow);
-      const st = state.libraryStatus || {};
-      const ragOk = !!st.rag_index;
-      const citeOk = !!st.cite_index;
-
-      statusRow.appendChild(statusPill(state.library ? `📚 当前范文库：${state.library}` : "📚 未选择范文库", !!state.library, () => openPrepWizard({ need: "rag" })));
-
-      statusRow.appendChild(statusPill(ragOk ? "✅ 范文证据已准备" : "⚠️ 范文证据未准备", ragOk, () => openPrepWizard({ need: "rag" })));
-
-      const provider = localStorage.getItem("aiw.llmProvider") || "local";
-      let llmOk = false;
-      let llmLabel = "";
-      if (provider === "api") {
-        const api = state.llmApi || {};
-        llmOk = !!(api.api_key_present && String(api.base_url || "").trim() && String(api.model || "").trim());
-        llmLabel = llmOk ? "🧠 改写模型：API 已配置" : "⚠️ 改写模型：API 未配置";
-      } else {
-        const ls = state.llm || {};
-        const hasAssets = !!(ls.server_ok && ls.model_ok);
-        llmOk = hasAssets;
-        llmLabel = ls.running ? "🧠 改写模型：本地运行中" : hasAssets ? "🧠 改写模型：本地已安装" : "⚠️ 改写模型：本地缺失";
-      }
-      statusRow.appendChild(statusPill(llmLabel, llmOk, () => setRoute("llm")));
-
-      statusRow.appendChild(statusPill(citeOk ? "✅ 引用写法已准备" : "＋ 引用写法（可选）", citeOk, () => openPrepWizard({ need: "cite" })));
-    }
-
-    const onboarding = el("div", { class: "home-onboard" });
-    function renderOnboarding() {
-      clear(onboarding);
-      const st = state.libraryStatus || {};
-      if (!state.library) {
-        onboarding.appendChild(
-          el(
-            "div",
-            { class: "card" },
-            el("div", { class: "label" }, "第一次使用：先准备范文库（只做一次）"),
-            el("div", { class: "muted" }, "把同领域顶级 PDF 放进来，软件会生成“可引用的范文证据”。之后你每次写作都能白箱对照。"),
-            el(
-              "div",
-              { class: "row" },
-              el("button", { class: "btn btn-primary", type: "button", onclick: () => openPrepWizard({ need: "rag" }) }, "一键准备范文库"),
-              el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "去范文库页")
-            )
-          )
-        );
-        return;
-      }
-
-      if (!st.rag_index) {
-        onboarding.appendChild(
-          el(
-            "div",
-            { class: "card" },
-            el("div", { class: "label" }, "范文库未准备好：还不能找差距/模仿改写"),
-            el("div", { class: "muted" }, "第一次需要导入 PDF，并在本地生成“范文证据库”。完成后这里会自动变得可用。"),
-            el(
-              "div",
-              { class: "row" },
-              el("button", { class: "btn btn-primary", type: "button", onclick: () => openPrepWizard({ need: "rag" }) }, "一键准备范文库"),
-              el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "去范文库页")
-            )
-          )
-        );
-      }
-    }
-
-    const libGrid = el("div", { class: "topic-grid" });
-    const libSection = el(
-      "div",
-      { class: "grid", style: "gap:12px" },
       el(
         "div",
         { class: "row", style: "justify-content:space-between; align-items:flex-end" },
-        el(
-          "div",
-          null,
-          el("div", { class: "label" }, "我的范文库（专题库）"),
-          el("div", { class: "muted" }, "选择一个同领域范文库开始写作（越同领域，句式越像）。")
-        ),
-        el("div", { class: "row" }, el("button", { class: "btn", type: "button", onclick: () => setRoute("library") }, "管理…"))
+        el("div", null, el("div", { class: "label" }, "1) 选择范文库（专题库）"), el("div", { class: "muted" }, "越同领域，越像。")),
+        el("div", { class: "row" }, homeLibSel, prepBtn, manageBtn)
       ),
+      el("div", { class: "hr" }),
+      el("div", { class: "label" }, "2) 选择你要做什么"),
+      modeRow,
+      el("div", { class: "label", style: "margin-top:14px" }, "3) 粘贴你的文本"),
+      text,
+      el("div", { class: "home-actions" }, runBtn),
+      runHint,
+      el("div", { class: "home-subactions" }, helpBtn, sampleBtn, clearBtn),
+      el("div", { class: "muted" }, "提示：第一次没准备范文库也没关系，会自动弹出“准备向导”。快捷键：Ctrl+Enter 运行当前工具。")
+    );
+
+    const libGrid = el("div", { class: "topic-grid" });
+    const libSection = el(
+      "details",
+      { class: "details", open: !state.library },
+      el("summary", { class: "label" }, "我的范文库（专题库）"),
+      el("div", { class: "muted" }, "这里是你自己的同领域范文库。越同领域，句式对齐越像。"),
+      el("div", { class: "hr" }),
       libGrid
     );
 
@@ -1630,7 +1525,7 @@
       clear(libGrid);
 
       const libs = Array.isArray(state.libraries) ? state.libraries.slice() : [];
-      const shown = libs.slice(0, 6);
+      const shown = libs.slice(0, 4);
 
       for (const lib of shown) {
         const name = String((lib && lib.name) || "").trim();
@@ -1737,15 +1632,9 @@
 
     inner.appendChild(hero);
     inner.appendChild(inputCard);
-    inner.appendChild(toolPanel);
-    inner.appendChild(statusRow);
-    inner.appendChild(onboarding);
     inner.appendChild(libSection);
     root.appendChild(inner);
 
-    markToolActive();
-    renderStatus();
-    renderOnboarding();
     renderLibSection();
 
     return root;
@@ -2317,6 +2206,8 @@
     const advRow = el(
       "div",
       { class: "row", style: `display:${advOpen ? "flex" : "none"}` },
+      el("span", { class: "label" }, "范文数量"),
+      topk,
       el("span", { class: "label" }, "模型"),
       providerSel,
       el("span", { class: "label" }, "输出长度"),
@@ -2374,14 +2265,14 @@
         );
         return;
       }
-      exemplarsBox.appendChild(el("div", { class: "muted" }, "先获取范文对照（证据），再生成模仿改写。"));
+      exemplarsBox.appendChild(el("div", { class: "muted" }, "你可以直接点“一键模仿改写”（自动带证据）；也可以先点“只看范文证据”。"));
     }
 
     function renderOutEmpty() {
       clear(outBox);
       outBox.appendChild(el("div", { class: "label" }, "白箱输出将在这里展示"));
       outBox.appendChild(el("div", { class: "muted" }, "包含：对齐度对比（原文/轻改/中改） + 诊断（带证据） + 改写（带引用）。"));
-      outBox.appendChild(el("div", { class: "muted" }, "建议流程：先点“获取范文对照”确认证据 → 再点“生成模仿改写”。"));
+      outBox.appendChild(el("div", { class: "muted" }, "直接点击“一键模仿改写”即可：会自动检索范文证据并生成诊断 + 两版改写。"));
     }
 
     let genUiTimer = null;
@@ -2394,7 +2285,7 @@
       stopGenUiTimer();
       clear(outBox);
       const p = String(provider || "").toLowerCase();
-      const title = p === "api" ? "生成中…（API 请求中）" : "生成中…（本地模型运行中）";
+      const title = p === "api" ? "模仿改写中…（API 请求中）" : "模仿改写中…（本地模型运行中）";
 
       const stage = el("div", { class: "muted" }, "阶段：准备中…");
       const timeEl = el("div", { class: "muted mono" }, "耗时：0s");
@@ -2513,7 +2404,7 @@
           generate: false,
         });
         renderExemplars(r.exemplars || []);
-        toast("已获取范文对照。");
+        toast("已获取范文证据。");
         return r;
       } catch (e) {
         const msg = String(e.message || e);
@@ -2798,7 +2689,11 @@
       if (medium) outBox.appendChild(medium);
     }
 
-    const exBtn = el("button", { class: "btn", type: "button", onclick: fetchExemplars }, "获取范文对照");
+    const exBtn = el(
+      "button",
+      { class: "btn btn-ghost", type: "button", title: "只检索范文证据，不生成改写", onclick: fetchExemplars },
+      "只看范文证据"
+    );
     const genBtn = el(
       "button",
       {
@@ -2839,7 +2734,7 @@
           }
 
           genBtn.disabled = true;
-          genBtn.textContent = provider === "api" ? "生成中…（API 请求中）" : "生成中…（本地模型运行中）";
+          genBtn.textContent = provider === "api" ? "模仿改写中…（API）" : "模仿改写中…（本地）";
 
           // Allow cancel: abort the HTTP request; for local model also stop llama-server.
           const abort = new AbortController();
@@ -2921,11 +2816,11 @@
             }
           } finally {
             genBtn.disabled = false;
-            genBtn.textContent = "生成模仿改写";
+            genBtn.textContent = "一键模仿改写";
           }
         },
       },
-      "生成模仿改写"
+      "一键模仿改写"
     );
 
     const advBtn = el(
@@ -2951,14 +2846,12 @@
       el(
         "div",
         { class: "row" },
-        el("span", { class: "label" }, "范文数量"),
-        topk,
-        exBtn,
         genBtn,
+        exBtn,
         advBtn
       ),
       advRow,
-      el("div", { class: "muted" }, "提示：先“获取范文对照”再生成，能更清楚看到使用了哪些范文证据。")
+      el("div", { class: "muted" }, "提示：一键模仿改写会自动带证据；点“只看范文证据”可以先确认本次参考了哪些范文段落。")
     );
 
     const leftCol = el("div", { class: "grid", style: "gap:18px" }, inputCard, outBox);
@@ -3634,7 +3527,7 @@
           null,
           el("li", null, "范文库页：选择同领域 PDF → 一键准备（离线生成范文证据）。"),
           el("li", null, "找差距页：粘贴正文 → 开始找差距 → 定位最不像范文的句子（带证据）。"),
-          el("li", null, "模仿改写页：粘贴句子/段落 → 获取范文对照 → 生成模仿改写（保守版/更像版）。")
+          el("li", null, "模仿改写页：粘贴句子/段落 → 一键模仿改写（自动带证据；保守版/更像版）。")
         )
       ),
       el(
@@ -3735,6 +3628,65 @@
     });
   }
 
+  function maybeShowFirstRunModal() {
+    const key = "aiw.onboardSeen.v1";
+    if (localStorage.getItem(key) === "1") return;
+    if (route() !== "home") return;
+    try {
+      const open = !$("#modalBackdrop").classList.contains("hidden");
+      if (open) return;
+    } catch {}
+
+    localStorage.setItem(key, "1");
+
+    const body = el(
+      "div",
+      { class: "grid", style: "gap:12px" },
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "label" }, "3 步上手（不需要懂模型）"),
+        el(
+          "ol",
+          null,
+          el("li", null, "准备范文库：选择同领域 PDF → 一键准备（离线生成范文证据）。"),
+          el("li", null, "粘贴你的文本：句子/段落/正文都可以（中英混合可）。"),
+          el("li", null, "点击“一键模仿改写”：输出诊断 + 轻改/中改，并附范文证据。")
+        )
+      ),
+      el(
+        "div",
+        { class: "row", style: "justify-content:flex-end" },
+        el(
+          "button",
+          {
+            class: "btn btn-primary",
+            type: "button",
+            onclick: () => {
+              closeModal();
+              openPrepWizard({ need: "rag" });
+            },
+          },
+          "一键准备范文库"
+        ),
+        el(
+          "button",
+          {
+            class: "btn",
+            type: "button",
+            onclick: () => {
+              closeModal();
+              setRoute("help");
+            },
+          },
+          "先看新手教程"
+        )
+      )
+    );
+
+    openModal("欢迎使用 TopHumanWriting", body);
+  }
+
   function init() {
     const theme = localStorage.getItem("aiw.theme") || "light";
     setTheme(theme);
@@ -3743,6 +3695,7 @@
     bindClientLifecycle();
     bindEvents();
     render();
+    window.setTimeout(() => maybeShowFirstRunModal(), 480);
   }
 
   window.addEventListener("hashchange", render);

@@ -199,7 +199,7 @@ body[data-route="home"] .topbar-right {
 }
 
 .content {
-  padding: 36px 34px 54px;
+  padding: 42px 38px 60px;
   max-width: 1260px;
   width: 100%;
   margin: 0 auto;
@@ -357,6 +357,11 @@ body[data-route="home"] .topbar-right {
   margin-top: 2px;
 }
 
+.home-runhint {
+  text-align: center;
+  margin-top: 8px;
+}
+
 .home-onboard {
   display: grid;
   gap: 14px;
@@ -373,7 +378,7 @@ body[data-route="home"] .topbar-right {
 .topic-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
+  gap: 20px;
   align-items: stretch;
 }
 
@@ -390,7 +395,7 @@ body[data-route="home"] .topbar-right {
 }
 
 .topic-card {
-  padding: 18px 18px;
+  padding: 20px 20px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -507,13 +512,13 @@ body[data-route="home"] .topbar-right {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 24px 24px;
+  padding: 26px 26px;
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.04);
 }
 
 .grid {
   display: grid;
-  gap: 18px;
+  gap: 20px;
 }
 
 .grid.two {
@@ -695,7 +700,7 @@ body[data-route="home"] .topbar-right {
 .item {
   border: 1px solid var(--border);
   border-radius: 14px;
-  padding: 16px 16px;
+  padding: 18px 18px;
   background: var(--bg-secondary);
 }
 
