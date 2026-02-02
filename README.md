@@ -1,4 +1,4 @@
-# TopHumanWriting | 顶级范文对齐写作（本地文档库 + 白箱证据 + 离线模型）
+# TopHumanWriting | 顶级范文对齐写作（后端 Python 包：CLI + SDK）
 
 [English](#english) | [中文](#中文)
 
@@ -6,169 +6,167 @@
 
 ## English
 
-TopHumanWriting is an **offline local web app** for “aligning to top human exemplars”:
+TopHumanWriting is a **backend-only** Python package (CLI + library) for “exemplar-alignment writing audit”:
 
-- Build a local **PDF exemplar library** (50–100 PDFs, zh/en/mixed)
-- Retrieve top-k exemplar excerpts with **PDF + page** (FAISS, local)
-- Generate **white-box** polish: diagnosis + controlled rewrites + evidence quotes (Qwen 3B via llama.cpp)
-  - Scaffold chips (click to copy, Shift+click to insert) + rewrite diff view
-- Build a **citation pattern bank**: in-text citation sentences + references (white-box, searchable)
+- Build a local **PDF exemplar library** (50–200 PDFs, zh/en/mixed)
+- Audit a target PDF and output **white-box** results:
+  - what looks unlike exemplars, where, and why
+  - exemplar evidence (**PDF + page**)
+  - optional “rewrite templates” (controlled, temperature=0)
+- Optional **CiteCheck**: author-year citation accuracy with evidence paragraphs
 
-### Quick Start (Web)
+This PyPI distribution intentionally **does not ship the web UI** (to keep the package lean).
 
-**Offline Release (unzip & run):**
+### Install
 
-GitHub Releases uses a **split download** (2GB per-asset limit):
+- Minimal: `pip install tophumanwriting`
+- With RAG (required for exemplar retrieval):
+  - `pip install "tophumanwriting[rag]"` (default: Chroma)
+  - or `pip install "tophumanwriting[rag-faiss]"` (FAISS)
+- With optional syntax checks: `pip install "tophumanwriting[syntax]"`
+- Everything for backend: `pip install "tophumanwriting[all]"`
 
-1. Download **both**:
-   - `TopHumanWriting_<version>_offline_base.zip`
-   - `TopHumanWriting_<version>_offline_llm_pack.zip`
-2. Unzip `..._offline_base.zip`
-3. Unzip `..._offline_llm_pack.zip` into the **same folder** (merge `models\\llm`)
-4. Run `TopHumanWriting.vbs` (silent, recommended) or `run_web.bat` (debug)
-5. Your browser opens `http://127.0.0.1:7860` (default; auto-switch if occupied)
+### Quickstart (CLI)
 
-If it stays on the startup page, open `TopHumanWriting_data/logs/launch.log` (or run `run_web.bat` to see errors).
+1. (Optional) Configure OpenAI-compatible LLM API (used by LLM review + CiteCheck):
 
-UI note (non-technical friendly):
-- Home follows: **choose library → choose mode → paste text → one-click run** (no jargon).
-- Align Polish has **one-click mimic rewrite** (auto evidence) + “view evidence only” (verify exemplars first).
+   - `TOPHUMANWRITING_LLM_API_KEY` (fallback: `SKILL_LLM_API_KEY`, `OPENAI_API_KEY`)
+   - `TOPHUMANWRITING_LLM_BASE_URL` (fallback: `SKILL_LLM_BASE_URL`, `OPENAI_BASE_URL`, usually ends with `/v1`)
+   - `TOPHUMANWRITING_LLM_MODEL` (fallback: `SKILL_LLM_MODEL`, `OPENAI_MODEL`)
 
-**From source (dev):**
+2. Run end-to-end (build once if needed → audit):
 
-1. Run `setup_env.bat` (once)
-2. Run `run_web.bat`
+   - `thw run --paper main.pdf --exemplars reference_papers --max-llm-tokens 200000`
 
-Main pages:
-- **Start**: a Metaso-style home (paste text → choose mode → run)
-- **Library**: create library → select PDF folder → **import to local** → build index
-- **Align Scan**: find least-aligned sentences (retrieval only, no LLM)
-- **Align Polish**: show exemplars (C1..Ck) → generate white-box polish (Qwen via llama.cpp)
-  - Shows scaffold chips + optional diff highlighting
-- **Citations**: build/search citation sentence patterns + open PDFs + view references
-- **Local LLM**: one-click start & test (Preset: 8GB)
+3. Output: the CLI prints an export folder that contains `result.json` + `report.md`.
 
-### Offline LLM Assets
+Budgeting:
+- Use `--max-llm-tokens` to hard-cap total LLM usage per run (LLM review + CiteCheck).
+- (Optional) Provide `--cost-per-1m-tokens` and `--max-cost` to show an approximate cost in reports (unitless; depends on your pricing).
 
-Expected paths:
-- `models/llm/llama-server.exe`
-- `models/llm/qwen2.5-3b-instruct-q4_k_m.gguf`
+### Build Once → Audit Many (recommended for real workflows)
 
-From source you can download them with `download_llm_assets.bat`.
+1. Download the semantic embedder model (once):
+   - `thw models download-semantic`
+2. Build exemplar library artifacts (slow, one-time):
+   - `thw library build --name reference_papers --pdf-root reference_papers`
+3. Run audits repeatedly (fast reuse):
+   - `thw audit run --paper main.pdf --library reference_papers --max-llm-tokens 200000`
 
-### Optional: OpenAI-compatible LLM API
+### Quickstart (Python)
 
-If you want to use a remote LLM (instead of local llama.cpp), configure it in **LLM Settings** or set env vars:
-- `SKILL_LLM_API_KEY` (or `OPENAI_API_KEY`)
-- `SKILL_LLM_BASE_URL` (or `OPENAI_BASE_URL`, usually ends with `/v1`)
-- `SKILL_LLM_MODEL` (or `OPENAI_MODEL`)
+```python
+from tophumanwriting import TopHumanWriting
 
-Note: some “reasoning-heavy” API models may need a larger `max_tokens` (e.g. **4096+**) to avoid truncated JSON.
-TopHumanWriting defaults API polish output length to **4096** (and auto-increases if too small).
+thw = TopHumanWriting(exemplars="reference_papers")  # folder with PDFs
+export = thw.run("main.pdf", max_llm_tokens=200000)  # fit if needed + audit
+print(export.report_md_path)
+```
 
-### Data & Cache Location (Portable)
+### Data & Cache Location
 
-By default, the app stores data next to the project folder:
+TopHumanWriting stores reusable artifacts under a writable data directory:
 
-- `TopHumanWriting_data/` (compatible with old `AIWordDetector_data/`)
-  - `settings.json`
-  - `libraries/*.json` (library stats)
-  - `libraries/<name>.sentences.json` (semantic sentence records, includes PDF source)
-  - `libraries/<name>.embeddings.npy` (semantic embeddings)
+- `TopHumanWriting_data/`
+  - `settings.json` (optional LLM config)
+  - `libraries/*.json` (library manifests / stats)
+  - `libraries/<name>.sentences.json` + `libraries/<name>.embeddings.npy`
   - `rag/<library>/` (RAG index)
   - `cite/<library>/` (citation bank)
+  - `audit/exports/` (export bundles)
 
-Override with `TOPHUMANWRITING_DATA_DIR` (or legacy `AIWORDDETECTOR_DATA_DIR`).
+Override with `TOPHUMANWRITING_DATA_DIR` (legacy `AIWORDDETECTOR_DATA_DIR` also works).
 
-### Notes
+### Limitations / Notes
 
-- If you replace the semantic model but keep an old index, results may look unchanged. The app will prompt to **rebuild the semantic index**.
-- Syntax analysis is optional; put UDPipe models in `models/syntax/` and rebuild the library.
+- Only **text-based** PDFs are supported (scanned PDFs are out of scope).
+- If you change the semantic model but keep an old index, rebuild the library to see changes.
 
-### Build Release Zip (Web)
+### Publishing to PyPI (maintainers)
 
-Run `build_release_web.bat` to generate `release/TopHumanWriting_<version>_offline.zip`.
+1. Bump version in `pyproject.toml`
+2. Build:
+   - `python -m build`
+3. Verify:
+   - `python -m twine check dist/*`
+4. Upload:
+   - `python -m twine upload dist/tophumanwriting-<version>*`
 
 ---
 
 ## 中文
 
-TopHumanWriting 是一个**离线本地网页**，用于“模仿顶级人类范文写法”的白箱写作：
+TopHumanWriting 是一个**后端 Python 包**（CLI + SDK），用于“模仿同领域顶级范文写法”的对照式白箱体检：
 
-- 你提供本地 PDF 范文库（50–100 篇，中英混合可）
-- 检索 top-k 范文片段并展示 **PDF + 页码**
-- 用本地 Qwen（llama.cpp）生成 **白箱** 输出：诊断 + 轻改/中改 + 范文证据引用
-- 从范文库抽取 **引用句式库**：正文 author-year 引用句子 + References，可检索可追溯
+- 你提供本地 PDF **范文库**（50–200 篇，中英混合可）
+- 对待检测 PDF 做**端到端体检**并输出白箱结果：
+  - 哪里不像范文、为什么不像、参考哪段范文（PDF+页码）
+  - 可选：给出“可复用的改写模板/句式骨架”（温度=0，尽量不发散）
+- 可选：**引用核查（CiteCheck）**，核查 author-year 引用是否准确/是否张冠李戴（附证据段落）
 
-### 快速开始（网页）
+本 PyPI 包为了更轻量，**不包含前端网页**。
 
-**离线发布包（解压即用）：**
+### 安装
 
-GitHub Releases 需要 **分包下载**（单文件限制 2GB）：
+- 最小安装：`pip install tophumanwriting`
+- 安装检索编排（做范文检索必需）：
+  - `pip install "tophumanwriting[rag]"`（默认：Chroma）
+  - 或 `pip install "tophumanwriting[rag-faiss]"`（FAISS）
+- 可选句法检查：`pip install "tophumanwriting[syntax]"`
+- 一次装齐后端所有依赖：`pip install "tophumanwriting[all]"`
 
-1. 下载 **两个文件**：
-   - `TopHumanWriting_<version>_offline_base.zip`
-   - `TopHumanWriting_<version>_offline_llm_pack.zip`
-2. 先解压 `..._offline_base.zip`
-3. 再把 `..._offline_llm_pack.zip` 解压到 **同一目录**（合并 `models\\llm`）
-4. 双击 `TopHumanWriting.vbs`（推荐：不弹黑窗口）或 `run_web.bat`（调试用）
-5. 浏览器会自动打开 `http://127.0.0.1:7860`（默认端口；若被占用会自动换端口）
+### 快速开始（CLI）
 
-如果一直停在启动页：打开 `TopHumanWriting_data/logs/launch.log`（或用 `run_web.bat` 看报错）。
+1. （可选）配置 OpenAI 兼容大模型 API（用于 LLM 分治体检 + CiteCheck）：
 
-UI 说明（面向非技术用户）：
-- 首页按 **选范文库 → 选模式 → 粘贴文本 → 一键运行** 设计，尽量不出现术语。
-- “对齐润色”默认提供 **一键模仿改写（自动带证据）**，另有 “只看范文证据” 方便先确认参考段落。
+   - `TOPHUMANWRITING_LLM_API_KEY`（fallback: `SKILL_LLM_API_KEY`, `OPENAI_API_KEY`）
+   - `TOPHUMANWRITING_LLM_BASE_URL`（fallback: `SKILL_LLM_BASE_URL`, `OPENAI_BASE_URL`，通常以 `/v1` 结尾）
+   - `TOPHUMANWRITING_LLM_MODEL`（fallback: `SKILL_LLM_MODEL`, `OPENAI_MODEL`）
 
-**源码运行（开发）：**
+2. 一条命令端到端运行（必要时会自动建库）：
 
-1. 运行 `setup_env.bat`（首次一次）
-2. 运行 `run_web.bat`
+   - `thw run --paper main.pdf --exemplars reference_papers --max-llm-tokens 200000`
 
-主要页面：
-- **开始**：Metaso 风格首页（粘贴文本 → 选模式 → 一键扫描/润色/引用）
-- **文献库**：建库 → 选 PDF 文件夹 → 导入到本地库 → 建索引（不弹 PowerShell）
-- **对齐扫描**：找出最不像范文的句子（仅检索，不调用 LLM）
-- **对齐润色**：展示范文证据（C1..Ck）→ 生成白箱润色（Qwen + llama.cpp）
-  - Scaffold 句式骨架（点一下复制；Shift+点一下插入）+ 改写差异对照
-- **引用借鉴**：抽取/检索引用句式库 + 打开原 PDF + 查看参考文献
-- **本地 LLM**：一键启动&测试（推荐 8GB 预设）
+3. 输出：命令行会打印导出目录，里面包含 `result.json` + `report.md`。
 
-### 本地 LLM 资产
+预算说明：
+- 用 `--max-llm-tokens` 硬限制单次运行的 LLM 总 tokens（同时覆盖 LLM 分治体检 + 引用核查）。
+- （可选）用 `--cost-per-1m-tokens` + `--max-cost` 仅用于在报告里展示估算成本（单位自定）。
 
-默认读取：
-- `models/llm/llama-server.exe`
-- `models/llm/qwen2.5-3b-instruct-q4_k_m.gguf`
+### 建库一次 → 反复体检（推荐）
 
-源码模式可用 `download_llm_assets.bat` 自动下载。
+1. 下载一次语义模型：`thw models download-semantic`
+2. 建范文库工件（慢，一次性）：`thw library build --name reference_papers --pdf-root reference_papers`
+3. 反复体检（复用索引）：`thw audit run --paper main.pdf --library reference_papers --max-llm-tokens 200000`
 
-### 可选：大模型 API（OpenAI 兼容）
+### 快速开始（Python）
 
-如果你想用“云端 API”替代本地 llama.cpp，可在 **LLM 设置** 页面配置，或设置环境变量：
-- `SKILL_LLM_API_KEY`（或 `OPENAI_API_KEY`）
-- `SKILL_LLM_BASE_URL`（或 `OPENAI_BASE_URL`，通常以 `/v1` 结尾）
-- `SKILL_LLM_MODEL`（或 `OPENAI_MODEL`）
+```python
+from tophumanwriting import TopHumanWriting
 
-提示：某些“强推理”模型可能需要更大的输出长度（例如 **4096+**）才能避免 JSON 被截断。
-TopHumanWriting 默认会把 API 润色输出长度设为 **4096**（过小会自动调大）。
+thw = TopHumanWriting(exemplars="reference_papers")
+export = thw.run("main.pdf", max_llm_tokens=200000)
+print(export.report_md_path)
+```
 
-### 数据与缓存位置（便于清理）
+### 数据与缓存位置
 
-默认放在项目目录旁的可携带数据目录：
+TopHumanWriting 会把可复用的工件写到数据目录：
 
-- `TopHumanWriting_data/`（兼容旧 `AIWordDetector_data/`）
+- `TopHumanWriting_data/`
   - `settings.json`
   - `libraries/*.json`
-  - `libraries/<库名>.sentences.json`（范句记录，含 PDF 出处）
-  - `libraries/<库名>.embeddings.npy`（语义向量）
-  - `rag/<库名>/`（RAG 检索索引）
+  - `libraries/<库名>.sentences.json` + `libraries/<库名>.embeddings.npy`
+  - `rag/<库名>/`（检索索引）
   - `cite/<库名>/`（引用句式库）
+  - `audit/exports/`（导出包）
 
 可用环境变量 `TOPHUMANWRITING_DATA_DIR` 覆盖（旧的 `AIWORDDETECTOR_DATA_DIR` 也兼容）。
 
-### 生成 Release Zip（网页版）
+### 注意事项
 
-运行 `build_release_web.bat` 会生成 `release/TopHumanWriting_<version>_offline.zip`。
+- 仅支持**可复制文字**的文本型 PDF；扫描版不考虑。
+- 更换语义模型后建议重建范文库工件，否则效果可能看起来没变化。
 
 ---
 
@@ -176,19 +174,16 @@ TopHumanWriting 默认会把 API 润色输出长度设为 **4096**（过小会�
 
 ```
 TopHumanWriting/
-├── webapp/              # FastAPI backend + static frontend
-├── aiwd/                # RAG / llama-server / polish core
-├── ai_word_detector.py
-├── i18n.py
-├── version.py
-├── requirements.txt
-├── setup_env.bat
-├── run_web.bat
-├── build_release_web.bat
-├── locales/
-├── word_lists/
-├── models/              # offline models (llama.cpp + gguf + onnx)
-├── TopHumanWriting_data/ # portable data/cache (runtime)
+├── tophumanwriting/       # PyPI package (CLI + sklearn-style API)
+│   ├── api.py             # TopHumanWriting.fit/audit/run
+│   ├── cli.py             # `thw` entrypoint
+│   ├── models.py          # semantic model download/status
+│   ├── _version.py
+│   └── locales/
+├── aiwd/                  # audit core (RAG/citecheck/LLM reviews)
+├── ai_word_detector.py    # legacy module (kept for compatibility)
+├── pyproject.toml
+├── MANIFEST.in
 └── README.md
 ```
 

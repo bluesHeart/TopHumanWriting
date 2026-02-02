@@ -40,16 +40,16 @@ if exist "python\\python.exe" (
 REM If deps are missing:
 REM - portable: fail fast (offline package should already include deps)
 REM - venv/system: attempt to install (may require pip access)
-%PY% -c "import fastapi,uvicorn" >nul 2>&1
+%PY% -c "import fastapi,uvicorn,fitz,llama_index.core,llama_index.vector_stores.faiss,faiss,numpy,onnxruntime,tokenizers" >nul 2>&1
 if errorlevel 1 (
   if "%MODE%"=="portable" (
-    echo 错误: 离线包依赖不完整（fastapi/uvicorn 缺失）
+    echo 错误: 离线包依赖不完整（缺少 FastAPI/Uvicorn 或 LlamaIndex/FAISS/PyMuPDF 等组件）
     echo 请重新解压完整离线包，或联系维护者重新构建 release。
     echo.
     pause
     exit /b 1
   )
-  echo 检测到缺少 FastAPI/Uvicorn，正在安装依赖...
+  echo 检测到缺少依赖，正在安装 requirements.txt...
   %PIP% install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 )
 

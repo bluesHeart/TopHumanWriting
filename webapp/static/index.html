@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>TopHumanWriting | 顶级范文对齐写作（离线）</title>
+    <title>TopHumanWriting | 顶级范文对齐写作（本地）</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/static/app.css" />
   </head>
@@ -34,15 +34,23 @@
           </button>
           <button class="nav-item" data-route="polish" type="button">
             <span class="nav-icon" aria-hidden="true">✨</span>
-            <span class="nav-label">模仿改写</span>
+            <span class="nav-label">对齐润色</span>
+          </button>
+          <button class="nav-item" data-route="audit" type="button">
+            <span class="nav-icon" aria-hidden="true">🩺</span>
+            <span class="nav-label">全稿体检</span>
           </button>
           <button class="nav-item" data-route="cite" type="button">
             <span class="nav-icon" aria-hidden="true">🔖</span>
             <span class="nav-label">引用写法</span>
           </button>
+          <button class="nav-item" data-route="norms" type="button">
+            <span class="nav-icon" aria-hidden="true">✅</span>
+            <span class="nav-label">写作规范</span>
+          </button>
           <button class="nav-item" data-route="llm" type="button">
             <span class="nav-icon" aria-hidden="true">🧠</span>
-            <span class="nav-label">模型设置</span>
+            <span class="nav-label">润色设置</span>
           </button>
           <button class="nav-item" data-route="help" type="button">
             <span class="nav-icon" aria-hidden="true">❓</span>
@@ -52,8 +60,8 @@
 
         <div class="sidebar-footer">
           <div class="footer-actions">
-            <button class="chip chip-llm" id="llmBadge" type="button" title="查看模型状态">
-              模型: —
+            <button class="chip chip-llm" id="llmBadge" type="button" title="配置对齐润色所需的大模型">
+              润色：—
             </button>
             <button class="chip chip-danger" id="exitBtn" type="button" title="退出（关闭本地服务）">退出</button>
           </div>
@@ -78,8 +86,8 @@
             <div class="route-subtitle" id="routeSubtitle">—</div>
           </div>
           <div class="topbar-right">
-            <div class="libbar">
-              <span class="muted">范文库</span>
+          <div class="libbar">
+              <span class="muted" id="libraryLabel">范文专题库</span>
               <select class="select" id="librarySelect"></select>
               <button class="btn btn-ghost" id="refreshBtn" type="button" title="刷新">刷新</button>
               <span id="indexChips" class="chips"></span>

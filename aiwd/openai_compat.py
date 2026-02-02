@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 import urllib.error
 import urllib.request
@@ -100,15 +101,44 @@ def _is_transient_status(status: int) -> bool:
     return 500 <= s <= 599
 
 
+def _looks_like_validation_required(data: dict) -> bool:
+    """
+    Some OpenAI-compatible gateways occasionally return HTTP 403 with a body that
+    indicates "VALIDATION_REQUIRED" / "verify your account" (often transient).
+    """
+    if not isinstance(data, dict):
+        return False
+    raw = ""
+    try:
+        err = data.get("error", None)
+        if isinstance(err, dict):
+            raw = str(err.get("message", "") or "")
+        if not raw:
+            raw = str(data.get("_raw", "") or data.get("_error", "") or "")
+    except Exception:
+        raw = ""
+    low = (raw or "").lower()
+    return ("validation_required" in low) or ("verify your account" in low)
+
+
+def _is_transient_response(status: int, data: dict) -> bool:
+    s = int(status or 0)
+    if _is_transient_status(s):
+        return True
+    if s == 403 and _looks_like_validation_required(data):
+        return True
+    return False
+
+
 @dataclass(frozen=True)
 class OpenAICompatConfig:
     api_key: str
     base_url: str
     model: str
     timeout_s: float = 60.0
-    max_retries: int = 3
-    base_retry_delay_s: float = 0.8
-    max_retry_delay_s: float = 6.0
+    max_retries: int = 5
+    base_retry_delay_s: float = 0.9
+    max_retry_delay_s: float = 10.0
 
     @property
     def base_url_v1(self) -> str:
@@ -151,12 +181,17 @@ class OpenAICompatClient:
                 timeout_s=timeout,
             )
             last_status, last_data = int(status or 0), data if isinstance(data, dict) else {}
-            if not _is_transient_status(last_status):
+            if not _is_transient_response(last_status, last_data):
                 return last_status, last_data
 
             # Retry with exponential backoff.
             if attempt < max_retries:
                 delay = min(max_delay, max(0.0, base_delay * (2**attempt)))
+                # Add jitter to avoid retry storms.
+                try:
+                    delay = delay * (0.85 + 0.3 * random.random())
+                except Exception:
+                    pass
                 try:
                     time.sleep(delay)
                 except Exception:
@@ -204,7 +239,58 @@ def extract_first_content(resp: dict) -> str:
             c0 = choices[0] if isinstance(choices[0], dict) else {}
             msg = c0.get("message", {}) if isinstance(c0, dict) else {}
             if isinstance(msg, dict):
-                return (msg.get("content", "") or "").strip()
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    return content.strip()
+                # Some gateways return "content" as a list of parts.
+                if isinstance(content, list):
+                    parts: list[str] = []
+                    for it in content:
+                        if isinstance(it, str):
+                            parts.append(it)
+                            continue
+                        if isinstance(it, dict):
+                            if isinstance(it.get("text", None), str):
+                                parts.append(it.get("text", ""))
+                                continue
+                            if isinstance(it.get("content", None), str):
+                                parts.append(it.get("content", ""))
+                                continue
+                    return "\n".join([p for p in parts if (p or "").strip()]).strip()
+                if isinstance(content, dict) and isinstance(content.get("text", None), str):
+                    return str(content.get("text", "") or "").strip()
+            # Fallback: some providers use legacy "text" at the choice level.
+            if isinstance(c0.get("text", None), str):
+                return (c0.get("text", "") or "").strip()
     except Exception:
         return ""
     return ""
+
+
+def extract_usage(resp: dict) -> Dict[str, int]:
+    """
+    Best-effort token usage extraction for OpenAI-compatible responses.
+
+    Returns a dict with keys: prompt_tokens, completion_tokens, total_tokens.
+    Missing fields are returned as 0.
+    """
+    if not isinstance(resp, dict):
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    usage = resp.get("usage", None)
+    if not isinstance(usage, dict):
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    try:
+        pt = int(usage.get("prompt_tokens", 0) or 0)
+    except Exception:
+        pt = 0
+    try:
+        ct = int(usage.get("completion_tokens", 0) or 0)
+    except Exception:
+        ct = 0
+    try:
+        tt = int(usage.get("total_tokens", 0) or 0)
+    except Exception:
+        tt = pt + ct
+    if tt <= 0:
+        tt = pt + ct
+    return {"prompt_tokens": max(0, pt), "completion_tokens": max(0, ct), "total_tokens": max(0, tt)}

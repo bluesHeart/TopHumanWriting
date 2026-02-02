@@ -14,6 +14,8 @@ _NUM_PREFIX_RE = re.compile(r"^\s*(?:\[\d+\]|\d+\.)\s+")
 _REF_START_NUMERIC_RE = re.compile(r"^\s*(?:\[\d+\]|\d+\.)\s+")
 _REF_START_AUTHOR_RE = re.compile(r"^[A-Z][A-Za-z'’\-]+,")
 _REF_START_AUTHOR_NO_COMMA_RE = re.compile(r"^[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+){0,2}\s*\(")
+_REF_START_CJK_RE = re.compile(r"^[\u4e00-\u9fff]{1,8}\s*[,，]")
+_REF_START_CJK_NO_COMMA_RE = re.compile(r"^[\u4e00-\u9fff]{1,8}(?:\s+[\u4e00-\u9fff]{1,8}){0,2}\s*[（(]")
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,10 @@ def _is_new_reference_line(line: str) -> bool:
         return True
     if _REF_START_AUTHOR_NO_COMMA_RE.match(line) and YEAR_RE.search(line[:220]):
         return True
+    if _REF_START_CJK_RE.match(line) and YEAR_RE.search(line[:220]):
+        return True
+    if _REF_START_CJK_NO_COMMA_RE.match(line) and YEAR_RE.search(line[:220]):
+        return True
     return False
 
 
@@ -138,4 +144,3 @@ def _parse_authors_year(reference_text: str) -> Tuple[str, str]:
     authors = prefix
     authors = _WS_RE.sub(" ", authors).strip()
     return (authors, year)
-

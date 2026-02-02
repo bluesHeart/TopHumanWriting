@@ -19,7 +19,6 @@ try:
     from llama_index.core import StorageContext, VectorStoreIndex, load_index_from_storage
     from llama_index.core.base.embeddings.base import BaseEmbedding
     from llama_index.core.schema import TextNode
-    from llama_index.vector_stores.faiss import FaissVectorStore
     from llama_index.core.utils import set_global_tokenizer
 except Exception:  # pragma: no cover
     StorageContext = None
@@ -27,8 +26,17 @@ except Exception:  # pragma: no cover
     load_index_from_storage = None
     BaseEmbedding = object
     TextNode = None
-    FaissVectorStore = None
     set_global_tokenizer = None
+
+try:
+    from llama_index.vector_stores.faiss import FaissVectorStore
+except Exception:  # pragma: no cover
+    FaissVectorStore = None
+
+try:
+    from llama_index.vector_stores.chroma import ChromaVectorStore
+except Exception:  # pragma: no cover
+    ChromaVectorStore = None
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z]+|\d+(?:\.\d+)?|[\u4e00-\u9fff]|\S", flags=re.UNICODE)
@@ -191,29 +199,99 @@ class RagIndexError(RuntimeError):
     pass
 
 
+def normalize_rag_backend(name: str) -> str:
+    """
+    Normalize RAG vector-store backend name.
+
+    Supported:
+      - faiss  (default)
+      - chroma
+    """
+    s = str(name or "").strip().lower()
+    if not s or s == "auto":
+        return "auto"
+    if s in ("faiss", "faiss-cpu"):
+        return "faiss"
+    if s in ("chroma", "chromadb"):
+        return "chroma"
+    return s
+
+
+def _rag_storage_subdir(backend: str) -> str:
+    b = normalize_rag_backend(backend)
+    if b in ("", "auto", "faiss"):
+        return "storage"
+    return f"storage_{b}"
+
+
+def _chroma_collection_name(library_name: str) -> str:
+    # Keep it stable and filesystem-safe.
+    n = re.sub(r"[^A-Za-z0-9_\\-]+", "_", str(library_name or "").strip())
+    n = re.sub(r"_+", "_", n).strip("_")
+    if not n:
+        n = "default"
+    return f"tophumanwriting__{n}"
+
+
 class RagSearchSession:
-    """Keep a loaded LlamaIndex+FAISS index in memory for repeated queries."""
+    """Keep a loaded LlamaIndex index in memory for repeated queries."""
 
     def __init__(
         self,
         *,
         storage_dir: str,
         embed_query: Callable[[str], "object"],
+        backend: str = "faiss",
+        chroma_path: str = "",
+        chroma_collection: str = "",
     ):
         self.storage_dir = storage_dir
         self._embed_query = embed_query
         self._idx = None
 
-        if StorageContext is None or load_index_from_storage is None or FaissVectorStore is None:
-            raise RagIndexError("LlamaIndex (core + faiss vector store) is required")
+        if StorageContext is None or load_index_from_storage is None:
+            raise RagIndexError("缺少依赖：llama-index-core（用于范文证据检索）")
         if not os.path.exists(os.path.join(storage_dir, "docstore.json")):
-            raise RagIndexError("index missing")
+            raise RagIndexError("范文证据索引缺失：请重新“准备范文库”")
 
         _ensure_llamaindex_tokenizer()
         embed_model = _CallableEmbedding(embed_sentences=None, embed_query=embed_query)
-        vs = FaissVectorStore.from_persist_dir(storage_dir)
-        sc = StorageContext.from_defaults(persist_dir=storage_dir, vector_store=vs)
-        self._idx = load_index_from_storage(sc, embed_model=embed_model)
+        b = normalize_rag_backend(backend)
+        if b in ("", "auto"):
+            b = "faiss"
+
+        if b == "faiss":
+            if FaissVectorStore is None:
+                raise RagIndexError(
+                    "缺少依赖：llama-index-vector-stores-faiss / faiss-cpu（建议：pip install tophumanwriting[rag-faiss]）"
+                )
+            vs = FaissVectorStore.from_persist_dir(storage_dir)
+            sc = StorageContext.from_defaults(persist_dir=storage_dir, vector_store=vs)
+            self._idx = load_index_from_storage(sc, embed_model=embed_model)
+            return
+
+        if b == "chroma":
+            if ChromaVectorStore is None:
+                raise RagIndexError(
+                    "缺少依赖：llama-index-vector-stores-chroma / chromadb（建议：pip install tophumanwriting[rag-chroma]）"
+                )
+            try:
+                import chromadb  # type: ignore
+            except Exception as e:
+                raise RagIndexError(f"缺少依赖：chromadb（{e}）")
+
+            chroma_path = os.path.abspath(str(chroma_path or "").strip())
+            if not chroma_path or not os.path.exists(chroma_path):
+                raise RagIndexError("Chroma 持久化目录缺失：请重新“准备范文库”或指定正确的 chroma_path")
+            collection_name = str(chroma_collection or "").strip() or _chroma_collection_name("default")
+            client = chromadb.PersistentClient(path=chroma_path)
+            collection = client.get_or_create_collection(collection_name)
+            vs = ChromaVectorStore(chroma_collection=collection)
+            sc = StorageContext.from_defaults(persist_dir=storage_dir, vector_store=vs)
+            self._idx = load_index_from_storage(sc, embed_model=embed_model)
+            return
+
+        raise RagIndexError(f"Unknown RAG backend: {backend}")
 
     def search(self, query: str, *, top_k: int = 8) -> List[Tuple[float, RagNode]]:
         query = normalize_ws(query)
@@ -265,23 +343,74 @@ class RagIndexer:
     Storage (per library):
       - manifest.json
       - nodes.jsonl
-      - faiss.index
+      - storage/           (faiss, legacy default)
+      - storage_chroma/    (chroma)
+      - chroma/            (chroma persistent store)
     """
 
-    def __init__(self, *, data_dir: str, library_name: str):
+    def __init__(self, *, data_dir: str, library_name: str, backend: str = "auto"):
         self.data_dir = data_dir
         self.library_name = library_name
         self.base_dir = os.path.join(data_dir, "rag", library_name)
         self.manifest_path = os.path.join(self.base_dir, "manifest.json")
         self.nodes_path = os.path.join(self.base_dir, "nodes.jsonl")
-        # LlamaIndex persisted storage lives here (contains default__vector_store.json + docstore/index_store).
-        self.storage_dir = os.path.join(self.base_dir, "storage")
+        # Backend resolution:
+        #   1) explicit argument (if not auto)
+        #   2) manifest.json backend (new format)
+        #   3) detect existing index folders (old format had no backend field)
+        #   4) env TOPHUMANWRITING_RAG_BACKEND
+        #   5) auto by installed extras (faiss if available else chroma)
+        want = normalize_rag_backend(backend)
+        if want in ("", "auto"):
+            try:
+                m = self._load_manifest()
+            except Exception:
+                m = {}
+            m_backend = normalize_rag_backend(str((m or {}).get("backend", "") or ""))
+            if m_backend not in ("", "auto"):
+                want = m_backend
+            else:
+                detected = ""
+                try:
+                    faiss_storage = os.path.join(self.base_dir, _rag_storage_subdir("faiss"))
+                    chroma_storage = os.path.join(self.base_dir, _rag_storage_subdir("chroma"))
+                    faiss_ready = os.path.exists(os.path.join(faiss_storage, "docstore.json"))
+                    chroma_ready = os.path.exists(os.path.join(chroma_storage, "docstore.json")) or os.path.exists(
+                        os.path.join(self.base_dir, "chroma")
+                    )
+                    if faiss_ready and not chroma_ready:
+                        detected = "faiss"
+                    elif chroma_ready and not faiss_ready:
+                        detected = "chroma"
+                except Exception:
+                    detected = ""
+
+                if detected:
+                    want = detected
+                else:
+                    env_backend = normalize_rag_backend(os.environ.get("TOPHUMANWRITING_RAG_BACKEND", "") or "")
+                    if env_backend not in ("", "auto"):
+                        want = env_backend
+                    else:
+                        # Best-effort auto selection based on installed extras.
+                        if FaissVectorStore is None and ChromaVectorStore is not None:
+                            want = "chroma"
+                        else:
+                            want = "faiss"
+        self.backend = want
+
+        # LlamaIndex persisted storage lives here (docstore/index_store).
+        self.storage_dir = os.path.join(self.base_dir, _rag_storage_subdir(self.backend))
+        self.chroma_dir = os.path.join(self.base_dir, "chroma")
+        self.chroma_collection = _chroma_collection_name(library_name)
         # Legacy / debug: raw FAISS index path (optional; not used when LlamaIndex storage exists).
         self.faiss_path = os.path.join(self.base_dir, "faiss.index")
 
     def _ensure_dir(self):
         os.makedirs(self.base_dir, exist_ok=True)
         os.makedirs(self.storage_dir, exist_ok=True)
+        if self.backend == "chroma":
+            os.makedirs(self.chroma_dir, exist_ok=True)
 
     @staticmethod
     def _rel_pdf_path(pdf_path: str, root: str) -> str:
@@ -340,11 +469,11 @@ class RagIndexer:
         progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
         cancel_cb: Optional[Callable[[], bool]] = None,
         max_nodes: int = 120000,
-        min_chars: int = 80,
+        min_chars: int = 60,
         max_chars: int = 900,
     ) -> RagBuildStats:
         if fitz is None:
-            raise RagIndexError("PyMuPDF (fitz) is required for RAG indexing")
+            raise RagIndexError("缺少依赖：PyMuPDF（fitz，用于解析 PDF）")
         _ensure_llamaindex_tokenizer()
 
         self._ensure_dir()
@@ -396,6 +525,15 @@ class RagIndexer:
                     page_text = "\n".join(lines)
                     page_text = drop_references_tail(page_text)
                     paras = split_paragraphs(page_text)
+                    # Some PDFs produce extra blank lines that split a paragraph into many tiny fragments.
+                    # If all fragments are shorter than min_chars but the joined text is usable, merge them.
+                    try:
+                        if paras and not any(len(p) >= int(min_chars) for p in paras):
+                            joined = normalize_ws(" ".join(paras))
+                            if len(joined) >= int(min_chars):
+                                paras = [joined]
+                    except Exception:
+                        pass
                     idx_in_page = 0
                     for p in paras:
                         p = normalize_ws(p)
@@ -429,6 +567,11 @@ class RagIndexer:
                 break
 
         stats.node_count = len(nodes)
+        if stats.node_count <= 0:
+            raise RagIndexError(
+                "未从 PDF 提取到可用的范文片段（0 段）。可能原因：PDF 是扫描/图片版无可复制文本，或提取结果被切得过碎。"
+                "建议：换可复制文本的 PDF 或先 OCR，再重新“一键准备”。"
+            )
 
         report("rag_embed", 0, len(nodes), "")
         texts = [n.text for n in nodes]
@@ -440,13 +583,25 @@ class RagIndexer:
         if embeddings is None:
             raise RagIndexError("embedding failed")
 
-        if StorageContext is None or VectorStoreIndex is None or TextNode is None or FaissVectorStore is None:
-            raise RagIndexError("LlamaIndex (core + faiss vector store) is required for RAG indexing")
+        if StorageContext is None or VectorStoreIndex is None or TextNode is None:
+            raise RagIndexError("缺少依赖：llama-index-core（用于构建范文证据）")
+        if self.backend == "faiss":
+            if FaissVectorStore is None:
+                raise RagIndexError(
+                    "缺少依赖：llama-index-vector-stores-faiss / faiss-cpu（建议：pip install tophumanwriting[rag-faiss]）"
+                )
+        elif self.backend == "chroma":
+            if ChromaVectorStore is None:
+                raise RagIndexError(
+                    "缺少依赖：llama-index-vector-stores-chroma / chromadb（建议：pip install tophumanwriting[rag-chroma]）"
+                )
+        else:
+            raise RagIndexError(f"Unknown RAG backend: {self.backend}")
 
         try:
             import numpy as np  # type: ignore
         except Exception as e:  # pragma: no cover
-            raise RagIndexError(f"numpy import failed: {e}")
+            raise RagIndexError(f"缺少依赖：numpy（{e}）")
 
         vecs = embeddings
         if hasattr(vecs, "astype"):
@@ -464,6 +619,10 @@ class RagIndexer:
         manifest = {
             "version": 1,
             "built_at": int(time.time()),
+            "backend": str(self.backend or "faiss"),
+            "storage_subdir": _rag_storage_subdir(self.backend),
+            "chroma_dir": "chroma" if self.backend == "chroma" else "",
+            "chroma_collection": self.chroma_collection if self.backend == "chroma" else "",
             "pdf_root": os.path.abspath(pdf_root),
             "pdf_count": stats.pdf_count,
             "node_count": stats.node_count,
@@ -476,11 +635,8 @@ class RagIndexer:
         return stats
 
     def _persist_llamaindex(self, nodes: Sequence[RagNode], vecs, *, embed_query: Callable[[str], "object"]):
-        # Lazy import faiss here to keep module import light.
-        try:
-            import faiss  # type: ignore
-        except Exception as e:  # pragma: no cover
-            raise RagIndexError(f"faiss import failed: {e}")
+        if StorageContext is None or VectorStoreIndex is None or TextNode is None:
+            raise RagIndexError("缺少依赖：llama-index-core（用于构建范文证据）")
 
         embed_model = _CallableEmbedding(embed_sentences=None, embed_query=embed_query)
 
@@ -495,10 +651,54 @@ class RagIndexer:
             tn.embedding = [float(x) for x in row.tolist()]
             text_nodes.append(tn)
 
-        vs = FaissVectorStore(faiss.IndexFlatIP(int(vecs.shape[1])))
-        sc = StorageContext.from_defaults(vector_store=vs)
-        _ = VectorStoreIndex(nodes=text_nodes, storage_context=sc, embed_model=embed_model)
+        backend = normalize_rag_backend(self.backend)
+        if backend in ("", "auto"):
+            backend = "faiss"
 
+        if backend == "faiss":
+            if FaissVectorStore is None:
+                raise RagIndexError(
+                    "缺少依赖：llama-index-vector-stores-faiss / faiss-cpu（建议：pip install tophumanwriting[rag-faiss]）"
+                )
+            # Lazy import faiss here to keep module import light.
+            try:
+                import faiss  # type: ignore
+            except Exception as e:  # pragma: no cover
+                raise RagIndexError(f"缺少依赖：faiss-cpu（{e}）")
+
+            vs = FaissVectorStore(faiss.IndexFlatIP(int(vecs.shape[1])))
+            sc = StorageContext.from_defaults(vector_store=vs)
+            _ = VectorStoreIndex(nodes=text_nodes, storage_context=sc, embed_model=embed_model)
+            self._persist_storage_context(sc)
+            return
+
+        if backend == "chroma":
+            if ChromaVectorStore is None:
+                raise RagIndexError(
+                    "缺少依赖：llama-index-vector-stores-chroma / chromadb（建议：pip install tophumanwriting[rag-chroma]）"
+                )
+            try:
+                import chromadb  # type: ignore
+            except Exception as e:
+                raise RagIndexError(f"缺少依赖：chromadb（{e}）")
+
+            os.makedirs(self.chroma_dir, exist_ok=True)
+            client = chromadb.PersistentClient(path=self.chroma_dir)
+            # Full rebuild for now: delete old collection to avoid duplicates.
+            try:
+                client.delete_collection(self.chroma_collection)
+            except Exception:
+                pass
+            collection = client.get_or_create_collection(self.chroma_collection)
+            vs = ChromaVectorStore(chroma_collection=collection)
+            sc = StorageContext.from_defaults(vector_store=vs)
+            _ = VectorStoreIndex(nodes=text_nodes, storage_context=sc, embed_model=embed_model)
+            self._persist_storage_context(sc)
+            return
+
+        raise RagIndexError(f"Unknown RAG backend: {backend}")
+
+    def _persist_storage_context(self, sc) -> None:
         # Persist to a temp dir, then atomically replace files to keep old index intact on failures.
         tmp_dir = self.storage_dir + ".tmp"
         try:
@@ -559,13 +759,25 @@ class RagIndexer:
         if not query:
             return []
         try:
-            sess = RagSearchSession(storage_dir=self.storage_dir, embed_query=embed_query)
+            sess = RagSearchSession(
+                storage_dir=self.storage_dir,
+                embed_query=embed_query,
+                backend=self.backend,
+                chroma_path=self.chroma_dir,
+                chroma_collection=self.chroma_collection,
+            )
         except Exception:
             return []
         return sess.search(query, top_k=top_k)
 
     def create_session(self, *, embed_query: Callable[[str], "object"]) -> RagSearchSession:
-        return RagSearchSession(storage_dir=self.storage_dir, embed_query=embed_query)
+        return RagSearchSession(
+            storage_dir=self.storage_dir,
+            embed_query=embed_query,
+            backend=self.backend,
+            chroma_path=self.chroma_dir,
+            chroma_collection=self.chroma_collection,
+        )
 
 
 class _CallableEmbedding(BaseEmbedding):

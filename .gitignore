@@ -8,6 +8,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pyo
+.pytest_cache/
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Build artifacts
 build/
@@ -38,6 +44,9 @@ TopHumanWriting_data/
 # User data (vocabulary built from PDFs)
 vocabulary_data.json
 libraries/
+
+# Local exemplar library (often contains large PDFs and download logs)
+reference_papers/
 
 # User's personal PDF files
 *.pdf

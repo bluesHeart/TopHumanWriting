@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tophumanwriting"
+version = "2.9.6"
+description = "TopHumanWriting: exemplar-alignment writing audit toolkit (PDF + exemplar library)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "TopHumanWriting" }]
+keywords = ["academic-writing", "rag", "pdf", "citation", "writing-audit"]
+
+dependencies = [
+  "PyMuPDF>=1.23.0",
+  "numpy>=1.24.0",
+  "onnxruntime>=1.16.0",
+  "tokenizers>=0.14.0",
+  "jieba>=0.42.1",
+]
+
+[project.optional-dependencies]
+syntax = [
+  "ufal.udpipe>=1.4.0.1",
+]
+rag-faiss = [
+  "llama-index-core==0.14.13",
+  "llama-index-vector-stores-faiss==0.5.2",
+  "faiss-cpu==1.13.2",
+]
+rag-chroma = [
+  "llama-index-core==0.14.13",
+  "llama-index-vector-stores-chroma==0.5.5",
+  "chromadb>=1.4.1",
+]
+rag = [
+  "llama-index-core==0.14.13",
+  "llama-index-vector-stores-chroma==0.5.5",
+  "chromadb>=1.4.1",
+]
+all = [
+  "llama-index-core==0.14.13",
+  "llama-index-vector-stores-chroma==0.5.5",
+  "chromadb>=1.4.1",
+  "ufal.udpipe>=1.4.0.1",
+]
+
+[project.scripts]
+thw = "tophumanwriting.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+py-modules = ["ai_word_detector"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+namespaces = false
+include = ["aiwd*", "tophumanwriting*"]
+exclude = [
+  "venv*",
+  "TopHumanWriting_data*",
+  "AIWordDetector_data*",
+  "trash*",
+  "release*",
+  "models*",
+  "dist*",
+  "tests*",
+  "scripts*",
+]
+
+[tool.setuptools.package-data]
+tophumanwriting = ["locales/*.json"]

@@ -1,12 +1,7 @@
-PyMuPDF>=1.23.0
-jieba>=0.42.1
-onnxruntime>=1.16.0
-tokenizers>=0.14.0
-numpy>=1.24.0
-ufal.udpipe>=1.4.0.1
-llama-index-core==0.14.13
-llama-index-vector-stores-faiss==0.5.2
-faiss-cpu==1.13.2
-fastapi>=0.115.0
-uvicorn>=0.27.0
-python-multipart>=0.0.9
+# Dev convenience only (PyPI users should just `pip install tophumanwriting[rag]`).
+#
+# Editable install with all optional features:
+#   pip install -e ".[all]"
+
+-e .[all]
+

@@ -9,7 +9,8 @@ echo ========================================
 echo.
 
 REM NOTE:
-REM This script generates a fully offline "unzip & run" web release:
+REM This script generates a portable "unzip & run" local web release:
+REM - Retrieval/indexing runs locally; polish generation uses your configured LLM API.
 REM - release/<version_folder>/  (includes python runtime + deps + models)
 REM - release/<version_folder>.zip
 
@@ -26,7 +27,7 @@ if exist "venv\\Scripts\\python.exe" (
   set "PY=python"
 )
 
-for /f "usebackq delims=" %%V in (`%PY% -c "import version; print(getattr(version,'VERSION','0.0.0'))"`) do set "VER=%%V"
+for /f "usebackq delims=" %%V in (`%PY% -c "from tophumanwriting._version import VERSION; print(VERSION)"`) do set "VER=%%V"
 
 for /f "usebackq delims=" %%P in (`%PY% -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"`) do set "PYVER=%%P"
 for /f "usebackq delims=" %%T in (`%PY% -c "import sys; print(f'python{sys.version_info.major}{sys.version_info.minor}')"`) do set "PYTAG=%%T"
@@ -63,13 +64,11 @@ copy /y "run_web.bat" "%OUT_DIR%\\run_web.bat" >nul
 copy /y "setup_env.bat" "%OUT_DIR%\\setup_env.bat" >nul
 if exist "TopHumanWriting.vbs" copy /y "TopHumanWriting.vbs" "%OUT_DIR%\\TopHumanWriting.vbs" >nul
 copy /y "ai_word_detector.py" "%OUT_DIR%\\ai_word_detector.py" >nul
-copy /y "i18n.py" "%OUT_DIR%\\i18n.py" >nul
-copy /y "version.py" "%OUT_DIR%\\version.py" >nul
 if exist "UX_SPEC_WEB.md" copy /y "UX_SPEC_WEB.md" "%OUT_DIR%\\UX_SPEC_WEB.md" >nul
 
+robocopy "tophumanwriting" "%OUT_DIR%\\tophumanwriting" /e /ndl /nfl /njh /njs >nul
 robocopy "webapp" "%OUT_DIR%\\webapp" /e /ndl /nfl /njh /njs >nul
 robocopy "aiwd" "%OUT_DIR%\\aiwd" /e /ndl /nfl /njh /njs >nul
-robocopy "locales" "%OUT_DIR%\\locales" /e /ndl /nfl /njh /njs >nul
 robocopy "word_lists" "%OUT_DIR%\\word_lists" /e /ndl /nfl /njh /njs >nul
 
 if "%AIWORDS_RELEASE_NO_PYTHON%"=="1" (

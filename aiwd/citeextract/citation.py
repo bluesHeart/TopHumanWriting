@@ -8,7 +8,8 @@ from typing import Dict, List, Optional
 YEAR_PATTERN = r"(?:18|19|20)\d{2}[a-zA-Z]?"
 YEAR_RE = re.compile(rf"\b{YEAR_PATTERN}\b")
 
-_PAREN_RE = re.compile(r"\(([^()]{0,300})\)")
+# Match both ASCII parentheses () and full-width Chinese parentheses （）.
+_PAREN_RE = re.compile(r"[（(]([^（）()]{0,300})[）)]")
 
 _AUTH_TOKEN = r"[A-Z][A-Za-z'’\-]+"
 _AUTHORS_PATTERN = (
@@ -19,11 +20,17 @@ _AUTHORS_PATTERN = (
     rf"(?:\s+et\s+al\.)?"
 )
 _NARRATIVE_RE = re.compile(
-    rf"\b(?P<authors>{_AUTHORS_PATTERN})\s*\(\s*(?P<years>{YEAR_PATTERN}(?:\s*[,;]\s*{YEAR_PATTERN})*)\s*\)"
+    rf"\b(?P<authors>{_AUTHORS_PATTERN})\s*[（(]\s*(?P<years>{YEAR_PATTERN}(?:\s*[,;，；]\s*{YEAR_PATTERN})*)\s*[）)]"
 )
 
 _PAREN_EXCLUDE_RE = re.compile(r"(?i)^\s*(?:fig|figure|table|eq|equation|appendix|section|sec|chap|chapter)\b")
 _NARRATIVE_EXCLUDE_HEAD = {"fig", "figure", "table", "eq", "equation", "appendix", "section", "sec", "chap", "chapter", "panel"}
+
+_CJK_AUTH_TOKEN = r"[\u4e00-\u9fff]{1,8}"
+_CJK_AUTHORS_PATTERN = rf"{_CJK_AUTH_TOKEN}(?:\s*[、,，]\s*{_CJK_AUTH_TOKEN})*(?:\s*(?:等|等人))?"
+_CJK_NARRATIVE_RE = re.compile(
+    rf"(?P<authors>{_CJK_AUTHORS_PATTERN})\s*[（(]\s*(?P<years>{YEAR_PATTERN}(?:\s*[,;，；]\s*{YEAR_PATTERN})*)\s*[）)]"
+)
 
 
 @dataclass(frozen=True)
@@ -52,13 +59,19 @@ def find_citations(sentence: str) -> List[Citation]:
         for year in years:
             citations.append(Citation(kind="narrative", authors=authors, year=year, raw=m.group(0)))
 
+    for m in _CJK_NARRATIVE_RE.finditer(sentence):
+        authors = (m.group("authors") or "").strip()
+        years = _extract_years(m.group("years") or "")
+        for year in years:
+            citations.append(Citation(kind="narrative", authors=authors, year=year, raw=m.group(0)))
+
     for m in _PAREN_RE.finditer(sentence):
         inner = (m.group(1) or "").strip()
         if not inner or not YEAR_RE.search(inner):
             continue
         if _PAREN_EXCLUDE_RE.search(inner):
             continue
-        if "," not in inner:
+        if "," not in inner and "，" not in inner:
             continue
         citations.extend(_parse_parenthetical(inner, raw=m.group(0)))
 
@@ -74,7 +87,7 @@ def _parse_parenthetical(inner: str, *, raw: str) -> List[Citation]:
         if not part:
             continue
 
-        m = re.match(r"^(?P<authors>[^,]{2,120})\s*,\s*(?P<rest>.*)$", part)
+        m = re.match(r"^(?P<authors>[^,，]{2,120})\s*[,，]\s*(?P<rest>.*)$", part)
         if m:
             authors = (m.group("authors") or "").strip()
             years = _extract_years(m.group("rest") or "")
@@ -125,4 +138,3 @@ def _extract_years(s: str) -> List[str]:
         seen.add(y)
         out.append(y)
     return out
-

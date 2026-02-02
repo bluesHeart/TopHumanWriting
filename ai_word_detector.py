@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-TopHumanWriting v2.8.x - Exemplar Alignment Writing Assistant
+TopHumanWriting v2.9.x - Exemplar Alignment Writing Assistant
 
 Build a local exemplar library (PDFs) and help users revise text to better match
 top human writing style with white-box evidence (PDF + page + quote).
@@ -40,8 +40,8 @@ from datetime import datetime
 import time
 import shutil
 
-from version import VERSION
-from i18n import get_i18n, t, set_language, get_language
+from tophumanwriting._version import VERSION
+from tophumanwriting.i18n import get_i18n, t, set_language, get_language
 
 try:
     from aiwd.rag_index import RagIndexer, RagIndexError
@@ -50,15 +50,16 @@ except Exception:
     RagIndexError = Exception
 
 try:
-    from aiwd.llama_server import LlamaServerConfig, LlamaServerProcess
     from aiwd.polish import build_polish_prompt, extract_json, validate_polish_json, PolishValidationError
 except Exception:
-    LlamaServerConfig = None
-    LlamaServerProcess = None
     build_polish_prompt = None
     extract_json = None
     validate_polish_json = None
     PolishValidationError = Exception
+
+# Legacy stubs: local LLM support was removed in the web app (API-only).
+LlamaServerConfig = None
+LlamaServerProcess = None
 
 
 # Font configuration - clean, readable fonts
@@ -972,24 +973,13 @@ class Settings:
             'accent': 'ocean',
             # RAG (exemplar retrieval) defaults
             'rag_top_k': 8,
-            # Local LLM (llama.cpp server) defaults
-            'llm_enabled': True,
-            'llm_model_path': '',
-            'llm_server_path': '',
-             'llm_ctx_size': 2048,
-             'llm_threads': 4,
-             'llm_ngl': 0,
-             'llm_temperature': 0.0,
-             'llm_max_tokens': 900,
-             'llm_json_retries': 2,
-             'llm_exemplar_max_chars': 420,
-             # Alignment scan defaults
-             'align_scan_max_items': 220,
-             # Guardrail: reject rewrites that drift too far from the selected text (cosine similarity).
-             'llm_min_similarity_light': 0.88,
-             'llm_min_similarity_medium': 0.82,
-             'llm_sleep_idle_seconds': 300,
-         }
+            # Alignment scan defaults
+            'align_scan_max_items': 220,
+            # LLM API (OpenAI-compatible) defaults (api_key recommended via env vars)
+            'llm_api_key': '',
+            'llm_api_base_url': '',
+            'llm_api_model': '',
+        }
         try:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
@@ -1019,6 +1009,26 @@ class LibraryManager:
         self.libraries_dir = os.path.join(get_settings_dir(), 'libraries')
         os.makedirs(self.libraries_dir, exist_ok=True)
 
+    @staticmethod
+    def infer_library_kind(name: str, data: Optional[dict] = None) -> str:
+        """Infer library kind for legacy library files that lack the `kind` field."""
+        try:
+            if isinstance(data, dict):
+                k = str(data.get("kind", "") or "").strip().lower()
+                if k in ("exemplar", "references"):
+                    return k
+        except Exception:
+            pass
+
+        n = str(name or "").strip().lower()
+        if not n:
+            return "exemplar"
+        if n.startswith("refs_") or n.startswith("refs-") or n.startswith("ref_") or n.startswith("ref-"):
+            return "references"
+        if n.startswith("citecheck") or n.startswith("references") or n.endswith("_refs") or n.endswith("-refs"):
+            return "references"
+        return "exemplar"
+
     def get_library_path(self, name: str) -> str:
         """Get full path for a library file"""
         safe_name = re.sub(r'[^\w\-]', '_', name)
@@ -1038,25 +1048,31 @@ class LibraryManager:
                     try:
                         with open(path, 'r', encoding='utf-8') as file:
                             data = json.load(file)
+                            kind = self.infer_library_kind(name, data if isinstance(data, dict) else None)
                             libraries.append({
                                 'name': name,
                                 'path': path,
+                                'kind': kind,
                                 'doc_count': data.get('doc_count', 0),
                                 'word_count': len(data.get('word_doc_freq', {}))
                             })
                     except:
+                        kind = self.infer_library_kind(name, None)
                         libraries.append({
                             'name': name,
                             'path': path,
+                            'kind': kind,
                             'doc_count': 0,
                             'word_count': 0
                         })
         return libraries
 
-    def create_library(self, name: str) -> str:
+    def create_library(self, name: str, kind: str = "exemplar") -> str:
         """Create a new empty library, return path"""
         path = self.get_library_path(name)
+        kind = self.infer_library_kind(name, {"kind": kind})
         data = {
+            'kind': kind,
             'word_doc_freq': {},
             'word_total_freq': {},
             'doc_count': 0,
@@ -1096,7 +1112,16 @@ class LibraryManager:
         """Clear library data but keep the library"""
         path = self.get_library_path(name)
         if os.path.exists(path):
+            kind = self.infer_library_kind(name, None)
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    old = json.load(f)
+                if isinstance(old, dict):
+                    kind = self.infer_library_kind(name, old)
+            except Exception:
+                pass
             data = {
+                'kind': kind,
                 'word_doc_freq': {},
                 'word_total_freq': {},
                 'doc_count': 0,
@@ -3099,7 +3124,6 @@ class ModernApp:
             self.root.after(300, lambda: self._require_semantic_model())
 
         self._status_flash_after_id = None
-        self._llama_server_proc = None
 
         # Long-running task state (PDF processing / semantic indexing)
         self._busy = False
@@ -5869,106 +5893,20 @@ class ModernApp:
             return self._rag_search(query, top_k=top_k)
 
     def _resolve_llm_server_path(self) -> str:
-        env = os.environ.get("AIWORDDETECTOR_LLAMA_SERVER_PATH", "").strip()
-        if env and os.path.exists(env):
-            return env
-        saved = (self.settings.get("llm_server_path", "") or "").strip()
-        if saved and os.path.exists(saved):
-            return saved
-        default_path = os.path.join(get_app_dir(), "models", "llm", "llama-server.exe")
-        if os.path.exists(default_path):
-            return default_path
-        return saved or env or default_path
+        # Local model support removed (API-only). Kept for backward compatibility with legacy UI code.
+        return ""
 
     def _resolve_llm_model_path(self) -> str:
-        env = os.environ.get("AIWORDDETECTOR_LLM_MODEL_PATH", "").strip()
-        if env and os.path.exists(env):
-            return env
-        saved = (self.settings.get("llm_model_path", "") or "").strip()
-        if saved and os.path.exists(saved):
-            return saved
-        default_path = os.path.join(get_app_dir(), "models", "llm", "qwen2.5-3b-instruct-q4_k_m.gguf")
-        if os.path.exists(default_path):
-            return default_path
-        return saved or env or default_path
+        # Local model support removed (API-only). Kept for backward compatibility with legacy UI code.
+        return ""
 
     def _get_llm_proc(self):
-        if LlamaServerProcess is None or LlamaServerConfig is None:
-            return None
-        server_path = self._resolve_llm_server_path()
-        model_path = self._resolve_llm_model_path()
-        try:
-            ctx = int(self.settings.get("llm_ctx_size", 2048) or 2048)
-        except Exception:
-            ctx = 2048
-        try:
-            threads = int(self.settings.get("llm_threads", 4) or 4)
-        except Exception:
-            threads = 4
-        try:
-            ngl = int(self.settings.get("llm_ngl", 0) or 0)
-        except Exception:
-            ngl = 0
-        try:
-            sleep_idle = int(self.settings.get("llm_sleep_idle_seconds", 300) or 300)
-        except Exception:
-            sleep_idle = 300
-
-        cfg = LlamaServerConfig(
-            server_path=server_path,
-            model_path=model_path,
-            ctx_size=max(512, min(ctx, 8192)),
-            threads=max(1, min(threads, 64)),
-            n_gpu_layers=max(0, min(ngl, 999999)),
-            sleep_idle_seconds=max(0, min(sleep_idle, 24 * 3600)),
-        )
-
-        proc = getattr(self, "_llama_server_proc", None)
-        if proc is None or getattr(proc, "cfg", None) is None:
-            log_path = os.path.join(get_settings_dir(), "llm", "llama_server.log")
-            proc = LlamaServerProcess(cfg, log_path=log_path)
-            self._llama_server_proc = proc
-            return proc
-
-        try:
-            same = (
-                getattr(proc.cfg, "server_path", "") == cfg.server_path
-                and getattr(proc.cfg, "model_path", "") == cfg.model_path
-                and int(getattr(proc.cfg, "ctx_size", 0) or 0) == int(cfg.ctx_size)
-                and int(getattr(proc.cfg, "threads", 0) or 0) == int(cfg.threads)
-                and int(getattr(proc.cfg, "n_gpu_layers", 0) or 0) == int(cfg.n_gpu_layers)
-            )
-        except Exception:
-            same = False
-
-        if not same:
-            try:
-                proc.stop()
-            except Exception:
-                pass
-            log_path = os.path.join(get_settings_dir(), "llm", "llama_server.log")
-            proc = LlamaServerProcess(cfg, log_path=log_path)
-            self._llama_server_proc = proc
-        else:
-            try:
-                proc.cfg = cfg
-            except Exception:
-                pass
-        return proc
+        # Local model support removed (API-only).
+        return None
 
     def _stop_llm_proc(self):
-        proc = getattr(self, "_llama_server_proc", None)
-        if proc is None:
-            return
-        try:
-            proc.stop()
-        except Exception:
-            pass
-        self._llama_server_proc = None
-        try:
-            self._update_llm_badge()
-        except Exception:
-            pass
+        # Local model support removed (API-only).
+        return
 
     def _update_llm_badge(self):
         badge = self._widgets.get("llm_badge")
@@ -6000,12 +5938,8 @@ class ModernApp:
                 tip.text = t("llm.tip.missing", server=server_path or "-", model=model_path or "-")
             return
 
+        # Local model support removed (API-only).
         running = False
-        proc = getattr(self, "_llama_server_proc", None)
-        try:
-            running = proc is not None and proc.is_running() and proc.health(timeout_s=0.6)
-        except Exception:
-            running = False
 
         if running:
             badge.config(text=t("llm.badge.running"), fg=Theme.SUCCESS)
@@ -6081,7 +6015,7 @@ class ModernApp:
             path = filedialog.askopenfilename(
                 title=t("polish.pick_server_title"),
                 initialfile=os.path.basename(cur) if cur else "",
-                filetypes=[("llama-server", "llama-server.exe"), ("EXE", "*.exe"), ("All", "*.*")],
+                filetypes=[("All", "*.*")],
             )
             if path:
                 server_var.set(path)
@@ -6097,7 +6031,7 @@ class ModernApp:
             path = filedialog.askopenfilename(
                 title=t("polish.pick_model_title"),
                 initialfile=os.path.basename(cur) if cur else "",
-                filetypes=[("GGUF", "*.gguf"), ("All", "*.*")],
+                filetypes=[("All", "*.*")],
             )
             if path:
                 model_var.set(path)
@@ -6217,7 +6151,7 @@ class ModernApp:
             temp_var.set("0.0")
 
         def _open_log():
-            log_path = os.path.join(get_settings_dir(), "llm", "llama_server.log")
+            log_path = os.path.join(get_settings_dir(), "llm", "llm.log")
             if not log_path or not os.path.exists(log_path):
                 messagebox.showinfo(t("msg.info"), t("llm.log_missing"))
                 return
@@ -6580,7 +6514,6 @@ class ModernApp:
             pass
 
         def _open_llm_settings():
-            # Choose llama-server.exe
             try:
                 cur_srv = self._resolve_llm_server_path()
             except Exception:
@@ -6588,7 +6521,7 @@ class ModernApp:
             srv = filedialog.askopenfilename(
                 title=t("polish.pick_server_title"),
                 initialfile=os.path.basename(cur_srv) if cur_srv else "",
-                filetypes=[("llama-server", "llama-server.exe"), ("EXE", "*.exe"), ("All", "*.*")],
+                filetypes=[("All", "*.*")],
             )
             if srv:
                 try:
@@ -6597,7 +6530,6 @@ class ModernApp:
                 except Exception:
                     pass
 
-            # Choose GGUF model
             try:
                 cur_model = self._resolve_llm_model_path()
             except Exception:
@@ -6605,7 +6537,7 @@ class ModernApp:
             model = filedialog.askopenfilename(
                 title=t("polish.pick_model_title"),
                 initialfile=os.path.basename(cur_model) if cur_model else "",
-                filetypes=[("GGUF", "*.gguf"), ("All", "*.*")],
+                filetypes=[("All", "*.*")],
             )
             if model:
                 try:

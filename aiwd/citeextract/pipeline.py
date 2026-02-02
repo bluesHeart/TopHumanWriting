@@ -9,6 +9,7 @@ from .pdf_text import extract_pdf_pages
 from .references import ReferenceEntry, iter_reference_entries_from_pages
 from .sentence_split import split_sentences
 from .text_clean import (
+    find_references_heading_line_index,
     looks_like_reference_entry,
     normalize_for_sentence_split,
     page_has_references_heading,
@@ -44,9 +45,23 @@ def iter_citation_sentences_from_pages(
     stop_at_references: bool = True,
 ) -> Iterator[CitationSentenceRecord]:
     if stop_at_references:
-        cut = _find_references_start(pages)
-        if cut is not None:
-            pages = pages[:cut]
+        # Keep text before the References heading on the same page (common when references start mid-page).
+        cut_page = _find_references_start(pages)
+        if cut_page is not None:
+            kept = pages[:cut_page]
+            try:
+                idx = find_references_heading_line_index(pages[cut_page])
+            except Exception:
+                idx = None
+            if idx is not None:
+                try:
+                    lines = (pages[cut_page] or "").splitlines()
+                    head = "\n".join(lines[: idx]).strip()
+                    if head:
+                        kept.append(head)
+                except Exception:
+                    pass
+            pages = kept
 
     for page_num, page_text in enumerate(pages, start=1):
         clean = normalize_for_sentence_split(page_text)
@@ -92,4 +107,3 @@ def _find_references_start(pages: List[str]) -> Optional[int]:
         if page_has_references_heading(text):
             return i
     return None
-

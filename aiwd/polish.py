@@ -846,7 +846,7 @@ def validate_polish_json(
             raise PolishValidationError("missing citations")
 
         if scaffolds:
-            # Soft constraint: local 3B models can miss scaffold insertion. Do not hard-fail.
+            # Soft constraint: models can miss scaffold insertion. Do not hard-fail.
             hit = False
             if lang == "zh":
                 for p in scaffolds:
