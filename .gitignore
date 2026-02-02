@@ -37,6 +37,9 @@ python/
 # Local cleanup / trash
 trash/
 
+# Local articles / drafts (keep outside git)
+articles/
+
 # Runtime cache (portable data folder)
 AIWordDetector_data/
 TopHumanWriting_data/
